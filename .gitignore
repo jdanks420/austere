@@ -1,0 +1,8 @@
+austere
+*.o
+.smoke-bin/
+.smoke-conf/
+.smoke-data/
+.smoke-launch-ok
+austere-valgrind.log
+austere-gate.log

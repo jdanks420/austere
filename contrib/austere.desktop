@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=austere
+Comment=low-spec X11 desktop shell
+Exec=austere
+TryExec=austere
+Type=Application
+Keywords=wm;tiling;xcb
+DesktopNames=austere;
