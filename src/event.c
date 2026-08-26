@@ -121,7 +121,20 @@ run_action(wm_t *wm, uint8_t action)
         if (!menu_active())
             menu_apps_open(wm);
         break;
+    case ACT_FOCUS_COLUMN_LEFT:
+        scroll_focus_column(wm, -1);
+        break;
+    case ACT_FOCUS_COLUMN_RIGHT:
+        scroll_focus_column(wm, 1);
+        break;
+    case ACT_SCROLL_LEFT:
+        scroll_left(wm);
+        break;
+    case ACT_SCROLL_RIGHT:
+        scroll_right(wm);
+        break;
     case ACT_MENU_STATES:
+
         if (!menu_active())
             menu_states_open(wm);
         break;

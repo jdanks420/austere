@@ -81,6 +81,11 @@ readback), valgrind.
   error` pipelines can mask this and you end up testing stale code
   that "proves" your new code works. Check the build actually relinked
   before drawing conclusions from behavior.
+- Gate runs require the user to be hands-off: their kitty/tmux
+  windows appear on :2 whenever Xephyr has focus while they type
+  (terminal binds fire inside austere), poisoning every
+  client-count/list-position assert. If counts drift mid-gate, look
+  for foreign WM_NAME entries before debugging the WM.
 - Injection scripts hard-refuse DISPLAY=:0/:1 (host displays): the
   persistent test shell often still exports `:0` from Xephyr restarts
   (Xephyr itself nests on the host display), and one missed `DISPLAY=`

@@ -6,6 +6,7 @@
 #include "menu.h"
 #include "monitor.h"
 #include "settings.h"
+#include "layout.h"
 #include "switcher.h"
 #include "util.h"
 #include "workspace.h"
@@ -92,6 +93,7 @@ switcher_enter(wm_t *wm, const char *input, const char *row)
         if (!ws_shown(c->ws))
             view_ws(wm, c->ws);
         focus(wm, c);
+        scroll_center_client(wm, c); /* scroll layout: center the pick */
         break;
     }
     return false;

@@ -7,6 +7,11 @@ static const action_ent_t registry[] = {
     { "spawn_terminal", ACT_SPAWN_TERMINAL },
     { "close_focused", ACT_CLOSE_FOCUSED },
     { "cycle_layout", ACT_CYCLE_LAYOUT },
+    { "focus_column_left", ACT_FOCUS_COLUMN_LEFT },
+    { "focus_column_right", ACT_FOCUS_COLUMN_RIGHT },
+    { "scroll_left", ACT_SCROLL_LEFT },
+    { "scroll_right", ACT_SCROLL_RIGHT },
+    { "set_layout", ACT_SET_LAYOUT }, /* +layout name via socket */
     { "toggle_float", ACT_TOGGLE_FLOAT },
     { "ratio_shrink", ACT_MWFACT_DEC },
     { "ratio_grow", ACT_MWFACT_INC },

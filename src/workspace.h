@@ -18,6 +18,7 @@ typedef struct workspace {
     unsigned layout_idx; /* active layout for THIS workspace */
     double split_ratio;  /* per-ws layout parameters (SPEC §4.2) */
     unsigned nmaster;
+    unsigned scroll_off; /* scroll layout: px panned past left edge */
     bool urgent;
 } workspace_t;
 

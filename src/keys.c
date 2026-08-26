@@ -157,6 +157,8 @@ keys_defaults(settings_t *s)
         { "super+space", "spawn_terminal" },
         { "alt+q", "close_focused" },
         { "super+s", "cycle_layout" },
+        { "super+Left", "focus_column_left" },
+        { "super+Right", "focus_column_right" },
         { "super+shift+space", "toggle_float" },
         { "super+h", "ratio_shrink" },
         { "super+l", "ratio_grow" },

@@ -14,6 +14,7 @@
 #include "launcher.h"
 #include "monitor.h"
 #include "socket.h"
+#include "layout.h"
 #include "states.h"
 #include "settings.h"
 #include "util.h"
@@ -134,6 +135,19 @@ serve_line(wm_t *wm, int fd, char *line)
         close(fd);
         socket_shutdown(wm);
         run_action(wm, id);
+        return;
+    }
+    if (id == ACT_SET_LAYOUT) {
+        if (!*arg) {
+            dprintf(fd, "err set_layout needs a name\n");
+            return;
+        }
+        if (!layout_by_name(arg)) {
+            dprintf(fd, "err unknown layout '%s'\n", arg);
+            return;
+        }
+        set_layout(wm, arg);
+        dprintf(fd, "ok\n");
         return;
     }
     if (id == ACT_LOAD_STATE) {

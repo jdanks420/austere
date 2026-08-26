@@ -28,6 +28,7 @@ workspaces_init(wm_t *wm)
         workspaces[i].layout_idx = 0;
         workspaces[i].split_ratio = cfg.split_ratio;
         workspaces[i].nmaster = cfg.nmaster;
+        workspaces[i].scroll_off = 0;
     }
 }
 

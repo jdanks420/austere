@@ -44,9 +44,18 @@ supported() { # supported <atom-name> -> does WM advertise it?
         tr ',' '\n' | sed 's/^ *//' | grep -qF -- "$1"
 }
 
+# Foreign windows (the user's kitty/tmux) can land on the test
+# display mid-run; every count/list assertion filters to fixtures.
+tcl_ids() {
+    for w in $(xprop -root _NET_CLIENT_LIST 2>/dev/null |
+        grep -o '0x[0-9a-f]*'); do
+        xprop -id "$w" WM_CLASS 2>/dev/null |
+            grep -qi testclient && echo "$w"
+    done
+}
+
 client_count() {
-    xprop -root _NET_CLIENT_LIST 2>/dev/null | grep -o '0x[0-9a-f]*' |
-        wc -l
+    tcl_ids | wc -l
 }
 
 count_gt() { [ "$(client_count)" -gt "$1" ]; }
@@ -54,8 +63,7 @@ count_le() { [ "$(client_count)" -le "$1" ]; }
 count_ge() { [ "$(client_count)" -ge "$1" ]; }
 
 nth_client() { # nth_client <n> -> window id of nth entry (oldest first)
-    xprop -root _NET_CLIENT_LIST 2>/dev/null |
-        grep -o '0x[0-9a-f]*' | sed -n "${1}p"
+    tcl_ids | sed -n "${1}p"
 }
 
 geom() { # geom <winid> -> "x y w h" absolute
@@ -378,6 +386,9 @@ if supported _NET_CURRENT_DESKTOP && [ -x "$wm_bin" ]; then
             nope "nine desktops advertised"
     fi
 
+    # geometry asserts below assume the tile grid (parked = x>=1280)
+    DISPLAY=$DISP "$(dirname "$0")/../contrib/austere-cmd" \
+        set_layout tile >/dev/null 2>&1 || true
     spawn_fixture w1a 100,100
     sleep 0.3
     spawn_fixture w1b 250,250
@@ -488,7 +499,10 @@ if [ -x "$poke" ] && [ -x "$wm_bin" ]; then
         ok "topology churn keeps WM alive" ||
         nope "topology churn keeps WM alive"
 
-    # closing one tiled client must re-fit the survivors
+    # closing one tiled client must re-fit the survivors (tile layout:
+    # heights grow; scroll/monocle keep them constant)
+    DISPLAY=$DISP "$(dirname "$0")/../contrib/austere-cmd" \
+        set_layout tile >/dev/null 2>&1 || true
     pre=$(client_count)
     spawn_fixture fitA 300,300
     sleep 0.4

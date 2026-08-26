@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "bar.h"
 #include "client.h"
 #include "layout.h"
 #include "settings.h"
@@ -10,6 +11,7 @@
 const layout_t austere_layouts[] = {
     { "tile", "[]=", tile_arrange },
     { "monocle", "[ ]", monocle_arrange },
+    { "scroll", "><", scroll_arrange },
 };
 
 const unsigned n_austere_layouts =
@@ -44,17 +46,26 @@ arrange(wm_t *wm)
     }
 }
 
+const layout_t *
+layout_by_name(const char *name)
+{
+    for (unsigned i = 0; i < n_austere_layouts; i++)
+        if (!strcmp(austere_layouts[i].name, name))
+            return &austere_layouts[i];
+    return NULL;
+}
+
 void
 set_layout(wm_t *wm, const char *name)
 {
-    for (unsigned i = 0; i < n_austere_layouts; i++) {
-        if (!strcmp(austere_layouts[i].name, name)) {
-            visible_ws(wm)->layout_idx = i;
-            arrange(wm);
-            return;
-        }
+    const layout_t *l = layout_by_name(name);
+
+    if (!l) {
+        fprintf(stderr, "austere: unknown layout '%s'\n", name);
+        return;
     }
-    fprintf(stderr, "austere: unknown layout '%s'\n", name);
+    visible_ws(wm)->layout_idx = (unsigned)(l - austere_layouts);
+    arrange(wm);
 }
 
 void
@@ -102,4 +113,35 @@ toggle_float(wm_t *wm)
         return;
     c->floating = !c->floating;
     arrange(wm);
+}
+
+/* Scroll layout panning (nwm-style): move the viewport by one column.
+ * Clamping happens in scroll_arrange against the real column count. */
+void
+scroll_nudge(wm_t *wm, int dir)
+{
+    workspace_t *ws = visible_ws(wm);
+
+    if (austere_layouts[ws->layout_idx].arrange != scroll_arrange)
+        return;
+    monitor_t *m = focused_mon(wm);
+    Rect a = mon_workarea(m);
+    unsigned gap = cfg.gap;
+    unsigned aw = a.w > 2 * gap ? a.w - 2 * gap : a.w;
+
+    ws->scroll_off = (unsigned)((int)ws->scroll_off +
+        dir * (int)(aw + gap));
+    arrange(wm);
+}
+
+void
+scroll_left(wm_t *wm)
+{
+    scroll_nudge(wm, -1);
+}
+
+void
+scroll_right(wm_t *wm)
+{
+    scroll_nudge(wm, 1);
 }

@@ -21,10 +21,17 @@ void tile_arrange(wm_t *wm, monitor_t *mon, workspace_t *ws);
 void monocle_arrange(wm_t *wm, monitor_t *mon, workspace_t *ws);
 
 void arrange(wm_t *wm);
+const layout_t *layout_by_name(const char *name);
 void set_layout(wm_t *wm, const char *name);
 void cycle_layout(wm_t *wm);
 void adjust_mwfact(wm_t *wm, double delta);
 void adjust_nmaster(wm_t *wm, int delta);
 void toggle_float(wm_t *wm);
+void scroll_arrange(wm_t *wm, monitor_t *mon, workspace_t *ws);
+void scroll_left(wm_t *wm);
+void scroll_right(wm_t *wm);
+void scroll_focus_column(wm_t *wm, int dir);
+void scroll_center_client(wm_t *wm, client_t *c);
+void scroll_right(wm_t *wm);
 
 #endif
