@@ -39,7 +39,8 @@ typedef struct bar {
     xcb_window_t win;
     draw_t draw;
     unsigned height;
-    bool mapped;
+    bool mapped;     /* reserving workarea */
+    bool on_screen;  /* map request sent */
     module_t mods[BAR_MAX_MODULES];
     unsigned nmods;  /* total instances */
     unsigned nleft;  /* instances[0..nleft) form the left group */

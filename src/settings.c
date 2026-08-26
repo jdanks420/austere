@@ -38,6 +38,7 @@ settings_defaults(settings_t *s)
     s->time_format = xstrdup("%a %d %b %H:%M");
     s->bar_bg = 0x1a1a1a;
     s->bar_fg = 0xcccccc;
+    s->bar_gap = 0;
 
     s->focus_follows_mouse = true;
     s->raise_on_click = true;
@@ -69,6 +70,8 @@ settings_defaults(settings_t *s)
 
     s->wp_dirs = NULL;
     s->nwp_dirs = 0;
+    s->autostart_run = NULL;
+    s->nautostart_run = 0;
     s->wp_setter = xstrdup("feh --bg-scale %s");
 }
 
@@ -108,6 +111,12 @@ settings_free_strings(settings_t *s)
     free(s->launcher_entries);
     s->launcher_entries = NULL;
     s->nlauncher_entries = 0;
+    for (unsigned i = 0; i < s->nwp_dirs; i++)
+        free(s->wp_dirs[i]);
+    free(s->wp_dirs);
+    for (unsigned i = 0; i < s->nautostart_run; i++)
+        free(s->autostart_run[i]);
+    free(s->autostart_run);
     for (unsigned i = 0; i < s->nmodules; i++) {
         free(s->mod_name[i]);
         free(s->mod_desc[i]);
@@ -121,6 +130,8 @@ settings_free_strings(settings_t *s)
 
     s->wp_dirs = NULL;
     s->nwp_dirs = 0;
+    s->autostart_run = NULL;
+    s->nautostart_run = 0;
     s->wp_setter = xstrdup("feh --bg-scale %s");
 }
 
@@ -143,13 +154,22 @@ settings_swap(settings_t *dst, settings_t *src)
 void
 settings_reload(wm_t *wm)
 {
+    settings_apply_file(wm, conf_path(), "config reloaded");
+}
+
+/* Transactional load of ANY config file: parse into scratch; on error
+ * the running config is untouched and a popup says so. */
+void
+settings_apply_file(wm_t *wm, const char *path, const char *ok_msg)
+{
     settings_t scratch;
 
     settings_defaults(&scratch);
     keys_defaults(&scratch);
-    if (!conf_load(conf_path(), &scratch, true)) {
-        fprintf(stderr, "austere: reload aborted (invalid conf)\n");
-        popup_notify(wm, "reload: invalid conf, keeping previous");
+    if (!conf_load(path, &scratch, true)) {
+        fprintf(stderr, "austere: load aborted (invalid conf %s)\n",
+            path);
+        popup_notify(wm, "invalid conf, keeping previous");
         settings_free_strings(&scratch);
         return;
     }
@@ -175,5 +195,5 @@ settings_reload(wm_t *wm)
     }
     bars_sync(wm);
     arrange(wm);
-    popup_notify(wm, "config reloaded");
+    popup_notify(wm, "%s", ok_msg);
 }

@@ -12,5 +12,7 @@ bool conf_load(const char *path, settings_t *s, bool strict);
 bool conf_write(const char *path, const settings_t *s);
 bool conf_parse_color(const char *s, uint32_t *out);
 void settings_reload(wm_t *wm);
+void settings_apply_file(wm_t *wm, const char *path,
+    const char *ok_msg);
 
 #endif

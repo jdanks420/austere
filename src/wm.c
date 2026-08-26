@@ -5,6 +5,8 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+#include "util.h"
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -20,6 +22,7 @@
 #include "ewmh.h"
 #include "popup.h"
 #include "settings.h"
+#include "states.h"
 #include "socket.h"
 #include "state.h"
 #include "welcome.h"
@@ -42,7 +45,7 @@ on_signal(int sig)
     char b = sig == SIGHUP ? 'r' : 'w';
 
     if (sig != SIGHUP) {
-        fprintf(stderr, "austere: DBG signal %d quitting\n", sig);
+        fprintf(stderr, "austere: signal %d quitting\n", sig);
         g_wm->running = 0;
     }
     ssize_t r;
@@ -240,8 +243,11 @@ wm_main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--replace") == 0)
             wm.replace = true;
+        else if (strcmp(argv[i], "--restart") == 0)
+            wm.restarted = true;
         else {
-            fprintf(stderr, "usage: %s [--replace]\n", wm.self);
+            fprintf(stderr, "usage: %s [--replace] [--restart]\n",
+                wm.self);
             return 2;
         }
     }
@@ -299,7 +305,11 @@ wm_main(int argc, char **argv)
     settings_defaults(&cfg);
     keys_defaults(&cfg);
     conf_ensure(conf_path());
-    conf_load(conf_path(), &cfg, false);
+    {
+        const char *state = states_boot_override();
+
+        conf_load(state ? state : conf_path(), &cfg, false);
+    }
     workspaces_init(&wm);
     ewmh_init(&wm);
 
@@ -331,6 +341,10 @@ wm_main(int argc, char **argv)
     scan_existing(&wm);
     state_replay(&wm);
 
+    if (!wm.restarted)
+        for (unsigned i = 0; i < cfg.nautostart_run; i++)
+            spawn_shell(cfg.autostart_run[i]);
+
     wm.running = 1;
     xcb_flush(wm.conn);
     welcome_maybe_show(&wm);
@@ -348,6 +362,24 @@ wm_restart(wm_t *wm)
     extern void state_save(wm_t *wm);
 
     state_save(wm);
+    /* flag the re-exec so autostart only fires on fresh boots */
+    int argc = 0;
+
+    while (wm->argv[argc])
+        argc++;
+    const char **na = malloc((size_t)(argc + 2) * sizeof(*na));
+
+    if (na) {
+        int n = 0;
+
+        while (wm->argv[n]) {
+            na[n] = wm->argv[n];
+            n++;
+        }
+        na[n++] = "--restart";
+        na[n] = NULL;
+        wm->argv = (char **)na;
+    }
     fprintf(stderr, "austere: restarting in place\n");
     xcb_flush(wm->conn);
     xcb_disconnect(wm->conn);

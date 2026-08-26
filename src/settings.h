@@ -40,6 +40,7 @@ typedef struct {
     char *time_format;
     uint32_t bar_bg;
     uint32_t bar_fg;
+    unsigned bar_gap;
 
     /* [behavior] */
     bool focus_follows_mouse;
@@ -80,6 +81,8 @@ typedef struct {
     /* [wallpaper] */
     char **wp_dirs;
     unsigned nwp_dirs;
+    char **autostart_run;
+    unsigned nautostart_run;
     char *wp_setter; /* "%s" = chosen path */
 
     /* [[launcher.module]] */

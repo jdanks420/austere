@@ -33,6 +33,11 @@ tile_arrange(wm_t *wm, monitor_t *mon, workspace_t *ws)
     nm = ws->nmaster < n ? ws->nmaster : n;
     mw = (int)((double)aw * ws->split_ratio);
 
+    unsigned mcol = nm < n ? nm : n;
+    unsigned scol = n - mcol;
+    int mh = ah - (int)((mcol - 1) * gap);
+    int sh = ah - (int)((scol - 1) * gap);
+
     int my = ay;     /* running y in master column */
     int sy = ay;     /* running y in stack column */
     unsigned sp = 0; /* placements made in stack column */
@@ -43,18 +48,16 @@ tile_arrange(wm_t *wm, monitor_t *mon, workspace_t *ws)
 
         if (i < nm) {
             unsigned mp = i; /* placements made in master column */
-            int h = (mp + 1 == nm || nm == n) ? ah - my + ay :
-                ah / (int)nm;
-            int w = (nm == n) ? aw : mw;
+            int h = (mp + 1 == mcol) ? ah - my + ay : mh / (int)mcol;
+            int w = (mcol == n) ? aw : mw;
             apply_geom(wm, c, ax, my, (unsigned)w, (unsigned)h);
-            my += h;
+            my += h + (int)gap;
         } else {
-            unsigned sn = n - nm;
-            int h = (sp + 1 == sn) ? ah - sy + ay : ah / (int)sn;
+            int h = (sp + 1 == scol) ? ah - sy + ay : sh / (int)scol;
             apply_geom(wm, c, ax + mw + (nm < n ? (int)gap : 0), sy,
                 (unsigned)(aw - mw - (nm < n ? (int)gap : 0)),
                 (unsigned)h);
-            sy += h;
+            sy += h + (int)gap;
             sp++;
         }
         i++;

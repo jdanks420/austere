@@ -14,6 +14,7 @@
 #include "launcher.h"
 #include "monitor.h"
 #include "socket.h"
+#include "states.h"
 #include "settings.h"
 #include "util.h"
 #include "workspace.h"
@@ -133,6 +134,16 @@ serve_line(wm_t *wm, int fd, char *line)
         close(fd);
         socket_shutdown(wm);
         run_action(wm, id);
+        return;
+    }
+    if (id == ACT_LOAD_STATE) {
+        if (!*arg) {
+            dprintf(fd, "err load_state needs a name\n");
+            return;
+        }
+        states_load(wm, arg)
+            ? dprintf(fd, "ok\n")
+            : dprintf(fd, "err no such state\n");
         return;
     }
     if (id == ACT_VIEW_WS || id == ACT_SEND_WS) {

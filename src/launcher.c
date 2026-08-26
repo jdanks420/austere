@@ -435,6 +435,7 @@ launcher_open(wm_t *wm)
         rows_n++;
     }
 
+
     panel_def_t def = {
         .title = "launch",
         .prompt = "",

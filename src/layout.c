@@ -31,6 +31,17 @@ arrange(wm_t *wm)
 
         austere_layouts[ws->layout_idx].arrange(wm, m, ws);
     }
+
+    /* Floaters must sit above tiled geometry so newly mapped clients
+     * don't bury them. */
+    for (client_t *c = wm->clients; c; c = c->next) {
+        if (c->floating && !c->scratch_hidden &&
+            workspaces[c->ws].mon &&
+            workspaces[c->ws].mon->ws_visible == c->ws)
+            xcb_configure_window(wm->conn, c->win,
+                XCB_CONFIG_WINDOW_STACK_MODE,
+                (uint32_t[]){ XCB_STACK_MODE_ABOVE });
+    }
 }
 
 void

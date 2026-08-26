@@ -18,10 +18,12 @@
 #include "menu.h"
 #include "switcher.h"
 #include "settings.h"
+#include "states.h"
 #include "socket.h"
 #include "state.h"
 #include "wallpaper.h"
 #include "ewmh.h"
+#include "apps.h"
 #include "event.h"
 #include "hotwatch.h"
 #include "popup.h"
@@ -102,7 +104,7 @@ run_action(wm_t *wm, uint8_t action)
         settings_reload(wm);
         break;
     case ACT_MENU_SETTINGS:
-        if (menu_active())
+            if (menu_active())
             menu_close(wm);
         else
             menu_open(wm);
@@ -114,6 +116,14 @@ run_action(wm_t *wm, uint8_t action)
     case ACT_SHOW_LAUNCHER:
         if (!menu_active())
             launcher_open(wm);
+        break;
+    case ACT_MENU_APPS:
+        if (!menu_active())
+            menu_apps_open(wm);
+        break;
+    case ACT_MENU_STATES:
+        if (!menu_active())
+            menu_states_open(wm);
         break;
     case ACT_MRU_STEP:
         mru_step(wm);
@@ -421,12 +431,20 @@ handle_event(wm_t *wm, xcb_generic_event_t *ev)
     case XCB_ENTER_NOTIFY:
         handle_enter_notify(wm, (xcb_enter_notify_event_t *)ev);
         break;
-    case XCB_BUTTON_PRESS:
-        if (!bar_button(wm, ((xcb_button_press_event_t *)ev)->event,
-                ((xcb_button_press_event_t *)ev)->event_x,
-                ((xcb_button_press_event_t *)ev)->detail))
-            mouse_press(wm, (xcb_button_press_event_t *)ev);
+    case XCB_BUTTON_PRESS: {
+        xcb_button_press_event_t *bev =
+            (xcb_button_press_event_t *)ev;
+
+        if (menu_panel_button(wm, bev->event, bev->event_y,
+                bev->detail))
+            break;
+        if (menu_overlay_button(wm, bev->event, bev->event_x,
+                bev->event_y, bev->detail, bev->time))
+            break;
+        if (!bar_button(wm, bev->event, bev->event_x, bev->detail))
+            mouse_press(wm, bev);
         break;
+    }
     case XCB_EXPOSE:
         if (menu_owns_window(((xcb_expose_event_t *)ev)->window))
             menu_expose(wm);

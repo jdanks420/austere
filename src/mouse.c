@@ -3,6 +3,7 @@
 #include <xcb/xcb.h>
 
 #include "client.h"
+#include "layout.h"
 #include "settings.h"
 #include "mouse.h"
 #include "util.h"
@@ -45,6 +46,11 @@ begin_drag(wm_t *wm, client_t *c, xcb_button_press_event_t *ev,
     m->orig_y = c->y;
     m->orig_w = c->w;
     m->orig_h = c->h;
+
+    if (!c->floating) {
+        c->floating = true;
+        arrange(wm);
+    }
 
     focus(wm, c);
     xcb_configure_window(wm->conn, c->win, XCB_CONFIG_WINDOW_STACK_MODE,

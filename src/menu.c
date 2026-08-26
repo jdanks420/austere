@@ -12,6 +12,7 @@
 #include "draw.h"
 #include "keys.h"
 #include "layout.h"
+#include "apps.h"
 #include "menu.h"
 #include "monitor.h"
 #include "popup.h"
@@ -79,6 +80,7 @@ static void modmask_set(int);
 
 static xcb_window_t win;
 static unsigned cur_w, cur_h; /* last applied panel geometry */
+static int cur_x, cur_y;
 static draw_t draw;
 static bool is_open;
 static row_t rows[MAX_ROWS];
@@ -207,6 +209,8 @@ gen_rows(void)
     r->sval = (char **)&cfg.bar_bg;
     r = add_row(R_COLOR, 0, "bar_fg");
     r->sval = (char **)&cfg.bar_fg;
+    r = add_row(R_INT, 0, "bar_gap");
+    r->ival = (int *)&cfg.bar_gap;
 
     add_row(R_HDR, 0, "behavior");
     r = add_row(R_BOOL, 0, "focus_follows_mouse");
@@ -440,6 +444,127 @@ menu_draw(wm_t *wm)
             (unsigned)strlen(editbuf), 0xffffff, 0x242424);
 }
 
+/* ---- application menu ------------------------------------------------ */
+
+static int apps_pending_cat = -1;
+
+static void apps_open_cat(wm_t *wm, unsigned cat);
+
+static bool
+apps_l2_enter(wm_t *wm, const char *input, const char *row)
+{
+    (void)input;
+    const char *exec = row ? app_exec_for(row) : NULL;
+
+    if (exec) {
+        spawn_shell(exec);
+        popup_notify(wm, "%s", row);
+    }
+    return false;
+}
+
+static bool
+apps_cat_enter(wm_t *wm, const char *input, const char *row)
+{
+    (void)wm;
+    (void)input;
+    for (unsigned c = 0; c < 5; c++)
+        if (row && !strcmp(row, app_category_name(c))) {
+            apps_pending_cat = (int)c;
+            return false; /* close; on_close drills in */
+        }
+    return false;
+}
+
+static void
+apps_l1_close(wm_t *wm)
+{
+    if (apps_pending_cat < 0)
+        return;
+    int c = apps_pending_cat;
+
+    apps_pending_cat = -1;
+    apps_open_cat(wm, (unsigned)c);
+}
+
+static void
+apps_open_cat(wm_t *wm, unsigned cat)
+{
+    static char **rows;
+    static unsigned n;
+
+    free(rows);
+    rows = NULL;
+    n = 0;
+    for (unsigned i = 0; i < apps_count(); i++)
+        if (app_category(i) == (int)cat)
+            n++;
+    if (!n)
+        return;
+    rows = xmalloc(n * sizeof(char *));
+    unsigned k = 0;
+
+    for (unsigned i = 0; i < apps_count(); i++)
+        if (app_category(i) == (int)cat)
+            rows[k++] = xstrdup(app_name(i));
+    for (unsigned a = 0; a + 1 < n; a++)
+        for (unsigned b = a + 1; b < n; b++)
+            if (strcasecmp(rows[a], rows[b]) > 0) {
+                char *t = rows[a];
+
+                rows[a] = rows[b];
+                rows[b] = t;
+            }
+    panel_def_t def = {
+        .title = app_category_name(cat), .prompt = "", .rows = rows,
+        .nrows = n, .filter = true, .on_enter = apps_l2_enter,
+        .px_w = 320, .anchor_bar = true
+    };
+
+    panel_open(wm, &def);
+}
+
+void
+menu_apps_open(wm_t *wm)
+{
+    apps_rescan();
+    if (!apps_count()) {
+        popup_notify(wm, "no applications found");
+        return;
+    }
+    unsigned per[5] = { 0 };
+
+    for (unsigned i = 0; i < apps_count(); i++) {
+        int c = app_category(i);
+
+        if (c >= 0 && c < 5)
+            per[c]++;
+    }
+    static char *cats[5];
+
+    for (unsigned c = 0; c < 5; c++)
+        cats[c] = (char *)app_category_name(c);
+    unsigned shown = 0, only = 5;
+
+    for (unsigned c = 0; c < 5; c++)
+        if (per[c]) {
+            shown++;
+            only = c;
+        }
+    if (shown == 1) {
+        apps_open_cat(wm, only);
+        return;
+    }
+    panel_def_t def = {
+        .title = "applications", .prompt = "",
+        .rows = cats, .nrows = 5, .filter = false,
+        .on_enter = apps_cat_enter, .on_close = apps_l1_close,
+        .px_w = 320, .anchor_bar = true
+    };
+
+    panel_open(wm, &def);
+}
+
 /* ---- shared list panel (switcher/launcher/welcome) ------------------ */
 
 static panel_def_t pdef;
@@ -519,22 +644,66 @@ panel_set_input(const char *s)
     psel = 0;
 }
 
+/* Panel placement. Default: centered, sized to content. Bar-anchored
+ * menus (application menu): skinny column aligned with the bar's left
+ * edge, filling the workarea — workarea already sits below a top bar /
+ * above a bottom one, so one formula serves both. */
+static void
+panel_layout(wm_t *wm, int *rx, int *ry, unsigned *rw, unsigned *rh,
+    unsigned *nvis_out)
+{
+    monitor_t *mon = focused_mon(wm);
+    Rect a = mon_workarea(mon);
+    unsigned w, h;
+    int x, y;
+
+    if (pdef.anchor_bar) {
+        /* share the tiled grid's outer insets so the menu's top edge
+         * lines up with the first client row */
+        int g = (int)cfg.gap;
+        int aw = (int)a.w - 2 * g;
+        int ah = (int)a.h - 2 * g;
+
+        if (aw < 160)
+            aw = (int)a.w;
+        if (ah < 3 * (int)row_h())
+            ah = (int)a.h;
+        w = (unsigned)aw < 320 ? (unsigned)aw : 320;
+        h = (unsigned)ah;
+        x = a.x + g;
+        y = a.y + g;
+    } else {
+        w = mon->geom.w * 3 / 5;
+        h = (pview_n < (a.h - 4 * row_h()) / row_h()
+                ? pview_n : (a.h - 4 * row_h()) / row_h())
+            * row_h() + 3 * row_h();
+        x = a.x + (int)((a.w - w) / 2);
+        y = a.y + (int)((a.h - h) / 2);
+    }
+    unsigned max_vis = (h - 3 * row_h()) / row_h();
+    unsigned nvis = pview_n < max_vis ? pview_n : max_vis;
+
+    if (!pdef.anchor_bar)
+        h = nvis * row_h() + 3 * row_h();
+    *rx = x;
+    *ry = y;
+    *rw = w;
+    *rh = h;
+    *nvis_out = nvis;
+}
+
 static void
 panel_draw(wm_t *wm)
 {
-    monitor_t *mon = focused_mon(wm);
-    unsigned w = mon->geom.w * 3 / 5;
+    int px, py;
+    unsigned w, h, nvis;
+
+    panel_layout(wm, &px, &py, &w, &h, &nvis);
     font_t *f = draw_ui_font(wm);
-    unsigned vis_h = mon_workarea(mon).h - 4 * row_h();
-    unsigned max_vis = vis_h / row_h();
-    unsigned nvis = pview_n < max_vis ? pview_n : max_vis;
-    unsigned h = nvis * row_h() + 3 * row_h();
     unsigned base = psel >= nvis ? psel - nvis + 1 : 0;
 
-    if (w != cur_w || h != cur_h) {
-        Rect a = mon_workarea(mon);
-        uint32_t vals[] = { (uint32_t)(a.x + (a.w - w) / 2),
-            (uint32_t)(a.y + (a.h - h) / 2), w, h };
+    if (w != cur_w || h != cur_h || px != cur_x || py != cur_y) {
+        uint32_t vals[] = { (uint32_t)px, (uint32_t)py, w, h };
 
         xcb_configure_window(wm->conn, win,
             XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
@@ -542,6 +711,8 @@ panel_draw(wm_t *wm)
             vals);
         cur_w = w;
         cur_h = h;
+        cur_x = px;
+        cur_y = py;
     }
     draw_rect(wm, &draw, 0, 0, w, h, 0x181818);
     draw_rect(wm, &draw, 0, 0, w, row_h(), 0x242424);
@@ -582,24 +753,21 @@ panel_draw(wm_t *wm)
 static void
 panel_create_window(wm_t *wm)
 {
-    monitor_t *mon = focused_mon(wm);
-    unsigned w = mon->geom.w * 3 / 5;
-    unsigned vis_h = mon_workarea(mon).h - 4 * row_h();
-    unsigned max_vis = vis_h / row_h();
-    unsigned nvis = pview_n < max_vis ? pview_n : max_vis;
-    unsigned h = nvis * row_h() + 3 * row_h();
-    Rect a = mon_workarea(mon);
+    int px, py;
+    unsigned w, h, nvis;
+
+    panel_layout(wm, &px, &py, &w, &h, &nvis);
 
     win = xcb_generate_id(wm->conn);
     xcb_create_window(wm->conn, XCB_COPY_FROM_PARENT, win,
-        wm->scr->root,
-        (int16_t)(a.x + (a.w - w) / 2), (int16_t)(a.y + (a.h - h) / 2),
+        wm->scr->root, (int16_t)px, (int16_t)py,
         (uint16_t)w, (uint16_t)h, 1, XCB_WINDOW_CLASS_INPUT_OUTPUT,
         XCB_COPY_FROM_PARENT,
         XCB_CW_OVERRIDE_REDIRECT | XCB_CW_BACK_PIXEL |
             XCB_CW_EVENT_MASK,
         (uint32_t[]){ 0x181818, 1,
-            XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_KEY_PRESS });
+            XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_KEY_PRESS |
+                XCB_EVENT_MASK_BUTTON_PRESS });
     draw_setup(wm, &draw, win);
     cur_w = w;
     cur_h = h;
@@ -818,6 +986,44 @@ menu_owns_window(xcb_window_t w)
 {
     return (is_open && w == win) ||
         (overlay_active && w == overlay.win);
+}
+
+/* Left click selects the row under the cursor; clicking the row that
+ * is already selected activates it. Returns true when consumed. */
+bool
+menu_panel_button(wm_t *wm, xcb_window_t w, int16_t y, uint8_t btn)
+{
+    if (btn != XCB_BUTTON_INDEX_1 || !is_open || w != win)
+        return false;
+    int px, py;
+    unsigned pw, ph, nvis;
+
+    panel_layout(wm, &px, &py, &pw, &ph, &nvis);
+    unsigned base = psel >= nvis ? psel - nvis + 1 : 0;
+
+    if (y < (int)row_h() || y >= (int)(row_h() + nvis * row_h()))
+        return true;
+    unsigned idx = base +
+        (unsigned)(y - (int)row_h()) / row_h();
+
+    if (idx >= pview_n)
+        return true;
+    if (idx == psel) {
+        panel_finish(wm, true);
+        return true;
+    }
+    psel = idx;
+    menu_draw(wm);
+    return true;
+}
+
+bool
+menu_overlay_button(wm_t *wm, xcb_window_t win, int16_t x, int16_t y,
+    uint8_t btn, xcb_timestamp_t t)
+{
+    if (!overlay_active || win != overlay.win || !overlay.button)
+        return false;
+    return overlay.button(wm, x, y, btn, t);
 }
 
 void

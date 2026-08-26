@@ -4,6 +4,7 @@
 #include <time.h>
 
 #include "atoms.h"
+#include "apps.h"
 #include "bar.h"
 #include "barmod.h"
 #include "settings.h"
@@ -16,7 +17,10 @@
 #include "util.h"
 #include "workspace.h"
 
+#include "logo.h"
+
 #define BAR_HEIGHT_PAD 2
+#define LOGO_PAD 4
 
 /* Hardcoded until M7 wires [bar] left/right ordering. */
 static const char *DEFAULT_LEFT[] = { "workspaces", "layout", "title",
@@ -142,10 +146,10 @@ mon_workarea(const monitor_t *m)
 
     if (m->bar && m->bar->mapped && r.h > m->bar->height) {
         if (cfg.bar_bottom)
-            r.h -= m->bar->height;
+            r.h -= (int)(m->bar->height + cfg.bar_gap);
         else {
-            r.y += (int)m->bar->height;
-            r.h -= m->bar->height;
+            r.y += (int)(m->bar->height + cfg.bar_gap);
+            r.h -= (int)(m->bar->height + cfg.bar_gap);
         }
     }
     return r;
@@ -159,12 +163,12 @@ bar_create_window(wm_t *wm, monitor_t *mon)
 
     b->height = font_height(f) + 2 * BAR_HEIGHT_PAD;
     int by = cfg.bar_bottom
-        ? (int)(mon->geom.y + mon->geom.h - b->height)
-        : mon->geom.y;
+        ? (int)(mon->geom.y + mon->geom.h - b->height - cfg.bar_gap)
+        : (int)(mon->geom.y + cfg.bar_gap);
     b->win = xcb_generate_id(wm->conn);
     xcb_create_window(wm->conn, XCB_COPY_FROM_PARENT, b->win,
-        wm->scr->root, (int16_t)mon->geom.x, (int16_t)by,
-        (uint16_t)mon->geom.w, (uint16_t)b->height, 0,
+        wm->scr->root, (int16_t)(mon->geom.x + cfg.bar_gap), (int16_t)by,
+        (uint16_t)(mon->geom.w - 2 * cfg.bar_gap), (uint16_t)b->height, 0,
         XCB_WINDOW_CLASS_INPUT_OUTPUT, XCB_COPY_FROM_PARENT,
         XCB_CW_OVERRIDE_REDIRECT | XCB_CW_BACK_PIXEL |
             XCB_CW_EVENT_MASK,
@@ -174,8 +178,8 @@ bar_create_window(wm_t *wm, monitor_t *mon)
         wm->atoms->net_wm_window_type, XCB_ATOM_ATOM, 32, 1,
         (const uint32_t[]){ wm->atoms->net_wm_window_type_dock });
     draw_setup(wm, &b->draw, b->win);
-    xcb_map_window(wm->conn, b->win);
-    b->mapped = true;
+    /* mapped later by bars_sync, after the first render: compositors
+     * snapshot at MapNotify and would freeze a blank frame */
 }
 
 /* Topology changed: create bars for new monitors, resize/move existing,
@@ -190,10 +194,10 @@ bars_sync(wm_t *wm)
         b->height = font_height(draw_ui_font(wm)) +
             2 * BAR_HEIGHT_PAD;
         int by = cfg.bar_bottom
-            ? (int)(m->geom.y + m->geom.h - b->height)
-            : m->geom.y;
-        uint32_t vals[] = { (uint32_t)m->geom.x, (uint32_t)by,
-            (uint32_t)m->geom.w, b->height };
+            ? (int)(m->geom.y + m->geom.h - b->height - cfg.bar_gap)
+            : (int)(m->geom.y + cfg.bar_gap);
+        uint32_t vals[] = { (uint32_t)(m->geom.x + cfg.bar_gap), (uint32_t)by,
+            (uint32_t)(m->geom.w - 2 * cfg.bar_gap), b->height };
 
         if (b->win == XCB_NONE)
             bar_create_window(wm, m);
@@ -205,8 +209,47 @@ bars_sync(wm_t *wm)
                 vals);
         b->mapped = true;
     }
+    /* paint first, then raise the curtain (see bar_create_window) */
     bar_render_all(wm);
+    for (monitor_t *m = wm->mons; m; m = m->next) {
+        if (!m->bar || !m->bar->on_screen) {
+            xcb_map_window(wm->conn, m->bar->win);
+            m->bar->on_screen = true;
+        }
+        m->bar->mapped = true;
+    }
     ewmh_update_workarea(wm);
+}
+
+/* Logo at the far left: alpha-blend the white or black variant onto
+ * the live bar background depending on which contrasts harder. */
+static void
+bar_draw_logo(wm_t *wm, monitor_t *mon)
+{
+    unsigned bgv = BAR_BG;
+    const uint8_t *px = ((bgv & 0xff) + ((bgv >> 8) & 0xff) +
+        ((bgv >> 16) & 0xff)) < 384 ? logo_white : logo_black;
+    unsigned br = (bgv >> 16) & 0xff, bg = (bgv >> 8) & 0xff,
+        bb = bgv & 0xff;
+    uint32_t out[LOGO_W * LOGO_H];
+    int ox = LOGO_PAD;
+    int oy = ((int)mon->bar->height - (int)LOGO_H) / 2;
+
+    if (oy < 0)
+        oy = 0;
+    for (unsigned i = 0; i < LOGO_W * LOGO_H; i++) {
+        unsigned a = px[i * 4 + 3];
+        unsigned r = px[i * 4], g = px[i * 4 + 1],
+            bl = px[i * 4 + 2];
+
+        out[i] = ((r * a + br * (255 - a) + 127) / 255 << 16) |
+            ((g * a + bg * (255 - a) + 127) / 255 << 8) |
+            (bl * a + bb * (255 - a) + 127) / 255;
+    }
+    xcb_put_image(wm->conn, XCB_IMAGE_FORMAT_Z_PIXMAP, mon->bar->win,
+        mon->bar->draw.gc, LOGO_W, LOGO_H, (int16_t)ox, (int16_t)oy,
+        0, wm->scr->root_depth, LOGO_W * LOGO_H * 4,
+        (const uint8_t *)out);
 }
 
 /* Left group then separator-daisy-chained right group. Script modules
@@ -218,9 +261,12 @@ bar_render(wm_t *wm, monitor_t *mon)
 
     if (!b || b->win == XCB_NONE)
         return;
-    draw_rect(wm, &b->draw, 0, 0, mon->geom.w, b->height, BAR_BG);
+    int bw = (int)mon->geom.w - 2 * (int)cfg.bar_gap;
 
-    int x = BAR_PAD;
+    draw_rect(wm, &b->draw, 0, 0, (unsigned)bw, b->height, BAR_BG);
+    bar_draw_logo(wm, mon);
+
+    int x = LOGO_W + 2 * LOGO_PAD;
     bool first = true;
 
     for (unsigned i = 0; i < b->nleft; i++) {
@@ -261,7 +307,7 @@ bar_render(wm_t *wm, monitor_t *mon)
 
     font_t *df = draw_ui_font(wm);
     unsigned sepw = draw_text_w(wm, df, "|", 1);
-    int rx = (int)(mon->geom.w - total - BAR_PAD);
+    int rx = bw - (int)total - BAR_PAD;
 
     /* positions first, then separators centered in each gap */
     int xs[BAR_MAX_MODULES] = { 0 };
@@ -333,9 +379,16 @@ bar_button(wm_t *wm, xcb_window_t win, int px, unsigned btn)
     for (monitor_t *m = wm->mons; m; m = m->next) {
         if (!m->bar || m->bar->win != win)
             continue;
+        /* logo hit zone sits ahead of every module */
+        if (px >= 0 && px < LOGO_W + 2 * LOGO_PAD &&
+            btn == XCB_BUTTON_INDEX_1) {
+            menu_apps_open(wm);
+            return true;
+        }
+
         /* hit-testing walks the left group only: right-group modules
          * are placed from the right edge and none take clicks */
-        int x = BAR_PAD;
+        int x = LOGO_W + 2 * LOGO_PAD + BAR_PAD;
 
         for (unsigned i = 0; i < m->bar->nleft; i++) {
             module_t *mod = &m->bar->mods[i];

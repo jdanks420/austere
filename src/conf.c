@@ -320,6 +320,7 @@ conf_load(const char *path, settings_t *s, bool strict)
     toml_datum_t mouse = toml_get(r.toptab, "mouse");
     toml_datum_t wp = toml_get(r.toptab, "wallpaper");
     toml_datum_t sw = toml_get(r.toptab, "switcher");
+    toml_datum_t at = toml_get(r.toptab, "autostart");
     toml_datum_t lnch = toml_get(r.toptab, "launcher");
 
     if (gen.type == TOML_TABLE) {
@@ -349,6 +350,7 @@ conf_load(const char *path, settings_t *s, bool strict)
         get_str(bar, "time_format", &s->time_format, &bad, strict);
         get_color(bar, "bar_bg", &s->bar_bg, &bad, strict);
         get_color(bar, "bar_fg", &s->bar_fg, &bad, strict);
+        get_int(bar, "bar_gap", 0, 128, &s->bar_gap, &bad, strict);
     }
     if (beh.type == TOML_TABLE) {
         get_bool(beh, "focus_follows_mouse", &s->focus_follows_mouse,
@@ -389,6 +391,24 @@ conf_load(const char *path, settings_t *s, bool strict)
                 s->wp_dirs = nl;
                 s->wp_dirs[s->nwp_dirs++] =
                     xstrdup(dirs.u.arr.elem[i].u.s);
+            }
+        }
+    }
+    if (at.type == TOML_TABLE) {
+        toml_datum_t run = toml_get(at, "run");
+
+        if (run.type == TOML_ARRAY) {
+            for (int32_t i = 0; i < run.u.arr.size; i++) {
+                if (run.u.arr.elem[i].type != TOML_STRING)
+                    continue;
+                char **nl = realloc(s->autostart_run,
+                    (s->nautostart_run + 1) * sizeof(char *));
+
+                if (!nl)
+                    break;
+                s->autostart_run = nl;
+                s->autostart_run[s->nautostart_run++] =
+                    xstrdup(run.u.arr.elem[i].u.s);
             }
         }
     }
@@ -507,7 +527,7 @@ conf_write(const char *path, const settings_t *s)
         "unfocus_color = \"%s\"\nurgent_color = \"%s\"\ngap = %u\n"
         "smart_gaps = %s\nfont = \"%s\"\n\n"
         "[bar]\nposition = \"%s\"\ntime_format = \"%s\"\n"
-        "bar_bg = \"%s\"\nbar_fg = \"%s\"\n\n"
+        "bar_bg = \"%s\"\nbar_fg = \"%s\"\nbar_gap = %u\n\n"
         "[behavior]\nfocus_follows_mouse = %s\nraise_on_click = %s\n"
         "snap_distance = %u\npopup_timeout = %u\n\n"
         "[layouts]\ndefault = \"%s\"\nnmaster = %u\n"
@@ -517,7 +537,7 @@ conf_write(const char *path, const settings_t *s)
         HEXCOL(2, urgent_color), s->gap, s->smart_gaps ? "true" : "false",
         s->font ? s->font : "16",
         s->bar_bottom ? "bottom" : "top", s->time_format,
-        HEXCOL(3, bar_bg), HEXCOL(4, bar_fg),
+        HEXCOL(3, bar_bg), HEXCOL(4, bar_fg), s->bar_gap,
         s->focus_follows_mouse ? "true" : "false",
         s->raise_on_click ? "true" : "false",
         s->snap_distance, s->popup_timeout,
@@ -586,6 +606,13 @@ conf_write(const char *path, const settings_t *s)
             fprintf(f, "%s\"%s\"", i ? ", " : "", s->wp_dirs[i]);
         fprintf(f, "]\n");
     }
+    if (s->nautostart_run) {
+        fprintf(f, "\n[autostart]\nrun = [");
+        for (unsigned i = 0; i < s->nautostart_run; i++)
+            fprintf(f, "%s\"%s\"", i ? ", " : "",
+                s->autostart_run[i]);
+        fprintf(f, "]\n");
+    }
     fprintf(f, "\n[mouse]\nmodifier = \"%s\"\nmove_button = %u\n"
         "resize_button = %u\n",
         s->mouse_mods == XCB_MOD_MASK_1 ? "alt" : "super",
@@ -631,7 +658,8 @@ conf_ensure(const char *path)
         "gap = 0\n# smart_gaps = true\n# font = \"16\"\n"
         "\n[bar]\nposition = \"top\"          # top | bottom\n"
         "time_format = \"%%a %%d %%b %%H:%%M\"\nbar_bg = \"#1a1a1a\"\n"
-        "bar_fg = \"#cccccc\"\n"
+        "bar_fg = \"#cccccc\"\nbar_gap = 0\n"
+        "\n[autostart]\n# run = [\"picom\", \"dunst\"]\n"
         "\n[behavior]\nfocus_follows_mouse = true\n"
         "raise_on_click = true\nsnap_distance = 12\npopup_timeout = 5\n"
         "\n[layouts]\ndefault = \"tile\"        # tile | monocle\n"
@@ -643,6 +671,7 @@ conf_ensure(const char *path)
         "#   alt+space launcher - super+e settings - super+m quit\n"
         "#   super+Escape reload - alt+w wallpaper - alt+r shuffle\n"
         "#   super+s cycle layout - super+shift+space float\n"
+        "#   super+grave state picker - super+p scratchpad\n"
         "# actions: quit spawn_terminal close_focused cycle_layout\n"
         "#   toggle_float ratio_shrink ratio_grow nmaster_inc\n"
         "#   nmaster_dec view_ws N send_ws N toggle_prev_ws\n"

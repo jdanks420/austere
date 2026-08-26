@@ -23,6 +23,7 @@ typedef struct wm {
     const char *self;
     char **argv; /* saved for execvp restart-in-place */
     bool replace;
+    bool restarted; /* re-exec'd by wm_restart: skip autostart */
     xcb_connection_t *conn;
     xcb_screen_t *scr;
     int scr_index;

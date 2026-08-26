@@ -256,7 +256,15 @@ unmanage(wm_t *wm, xcb_window_t win)
     free(c);
     ws_recompute_urgent(wm, ws_idx);
     ewmh_update_client_list(wm);
-    refocus_ws(wm, workspaces[ws_idx].mon->ws_visible);
+
+    /* Only a shown workspace needs a new focus and geometry; touching
+     * focus for a hidden one would clear it globally (focus_mon=NULL). */
+    monitor_t *mon = workspaces[ws_idx].mon;
+
+    if (mon && mon->ws_visible == ws_idx) {
+        refocus_ws(wm, mon->ws_visible);
+        arrange(wm);
+    }
 }
 
 /* Re-read the title property after a PropertyNotify; NULL-safe swap. */

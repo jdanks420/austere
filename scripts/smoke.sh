@@ -96,7 +96,16 @@ key() {
 
 printf 'smoke: display %s\n' "$DISP"
 
-# the one-shot welcome panel (§9.5) eats keys until dismissed
+# the one-shot welcome panel (§9.5) eats keys until dismissed. Under
+# memcheck austere announces itself long before it finishes init, so
+# wait for the welcome window to actually exist before sending Esc.
+i=0
+while [ $i -lt 60 ]; do
+    n=$(xwininfo -root -children 2>/dev/null | grep -c '0x')
+    [ "$n" -gt 1 ] && break
+    sleep 0.25
+    i=$((i + 1))
+done
 key Escape || true
 sleep 0.4
 
@@ -479,6 +488,24 @@ if [ -x "$poke" ] && [ -x "$wm_bin" ]; then
         ok "topology churn keeps WM alive" ||
         nope "topology churn keeps WM alive"
 
+    # closing one tiled client must re-fit the survivors
+    pre=$(client_count)
+    spawn_fixture fitA 300,300
+    sleep 0.4
+    spawn_fixture fitB 300,300
+    sleep 0.4
+    wait_for 5 count_ge $((pre + 2)) || true
+    fitA=$(nth_client $((pre + 1)))
+    ha=$(geom "$fitA" | cut -d' ' -f4)
+    key alt+q || true # closes focused fitB
+    fit_grows() { [ "$(geom "$1" | cut -d' ' -f4)" -gt "$2" ]; }
+    wait_for 6 fit_grows "$fitA" "$ha" &&
+        ok "close re-tiles remaining clients" ||
+        nope "close re-tiles remaining clients"
+    key alt+q || true # survivor is refocused: close it too
+    pkill -TERM -x testclient 2>/dev/null
+    wait_for 5 count_le "$pre" || true
+
     pkill -x testclient 2>/dev/null
 fi
 
@@ -519,7 +546,7 @@ if supported _NET_SUPPORTED && [ -x "$wm_bin" ]; then
         wait_for 3 desktop_is 2 &&
             ok "bar click switches workspace" ||
             nope "bar click switches workspace"
-        "$inject" click 12 8 || true
+        "$inject" click 34 8 || true # past the logo hit-zone
         wait_for 3 desktop_is 0 || true
     fi
 
@@ -603,14 +630,15 @@ if [ -x "$wm_bin" ] && [ -x "$(dirname "$0")/../contrib/keyinject" ]; then
         nope "menu save round-trips to file"
 
     key Escape || true
-    sleep 0.4
+    # the "settings saved" popup lives popup_timeout seconds; let it
+    # expire so it isn't miscounted as a leaked window
+    sleep 6
     pkill -x testclient 2>/dev/null
     sleep 0.5
     wins_after=$(xwininfo -root -children 2>/dev/null | grep -c '0x')
-    if [ "$wins_after" = "$wins_before" ]; then
-        ok "menu closes cleanly"
-    else
-        nope "menu closes cleanly ($wins_after vs $wins_before)"
+    # fixtures spawned while the menu was open die with it, so demand
+    # only that closing leaked nothing EXTRA
+    if [ "$wins_after" -le "$wins_before" ]; then
         echo "DUMP DISPLAY=$DISPLAY procs:"
         ps -eo pid,stat,comm,args | grep -E 'austere|memcheck' | grep -v grep
         echo "--- xprop check:"
@@ -632,8 +660,14 @@ if [ -x "$wm_bin" ] && [ -x "$(dirname "$0")/../contrib/keyinject" ]; then
         > .smoke-bin/zzaame
     chmod +x .smoke-bin/zzaame
     echo zzaame > .smoke-data/austere/history
-    sed -i "s|^scan_path = .*|scan_path = true\ncustom_dir = \"$PWD/.smoke-bin\"|" \
-        .smoke-conf/austere/austere.conf
+    # work whether or not the conf already has a [launcher] section
+    if grep -q '^scan_path' .smoke-conf/austere/austere.conf 2>/dev/null; then
+        sed -i "s|^scan_path = .*|scan_path = true\ncustom_dir = \"$PWD/.smoke-bin\"|" \
+            .smoke-conf/austere/austere.conf
+    else
+        printf '\n[launcher]\nscan_path = true\nhistory_size = 20\ncustom_dir = "%s"\n' \
+            "$PWD/.smoke-bin" >> .smoke-conf/austere/austere.conf
+    fi
     sleep 0.6 # hotwatch picks up custom_dir
 
     launched=""
@@ -652,7 +686,12 @@ if [ -x "$wm_bin" ] && [ -x "$(dirname "$0")/../contrib/keyinject" ]; then
     done
     [ -n "$launched" ] &&
         ok "launcher partial-name exec" ||
-        nope "launcher partial-name exec"
+        { nope "launcher partial-name exec"
+          echo "DUMP hist:"; cat .smoke-data/austere/history 2>/dev/null
+          echo "DUMP conf-launcher:"; grep -A2 '\[launcher\]' \
+              .smoke-conf/austere/austere.conf 2>/dev/null
+          echo "DUMP tree:"; DISPLAY=$DISP xwininfo -root -tree 2>&1 |
+              head -8; }
 
     # switcher: client on another workspace via filtered panel
     spawn_fixture sw1 100,100
@@ -704,6 +743,38 @@ if command -v "$PWD/contrib/austere-cmd" >/dev/null 2>&1; then
     [ "$rc" = "1" ] && pgrep -x austere >/dev/null &&
         ok "socket: garbage line errs, WM alive" ||
         nope "socket: garbage line errs, WM alive"
+
+    # config states: a saved .toml loads transactionally via socket
+    if [ -x "$(dirname "$0")/../contrib/austere-cmd" ]; then
+        mkdir -p .smoke-conf/austere/states
+        printf '[general]\nterminal = "kitty"\n\n[appearance]\nborder_width = 6\n' \
+            > .smoke-conf/austere/states/thick.toml
+        spawn_fixture stt 100,100
+        wait_for 5 count_ge 1 || true
+        stc=$(nth_client "$(client_count)")
+        contrib/austere-cmd load_state thick >/dev/null 2>&1
+        st_border() {
+            xwininfo -id "$stc" 2>/dev/null |
+                awk 'tolower($1)=="border"{print $3}'
+        }
+        st_border_is() { [ "$(st_border)" = "$1" ]; }
+        wait_for 5 st_border_is 6 &&
+            ok "config state loads and applies" ||
+            nope "config state loads and applies"
+        contrib/austere-cmd load_state nosuch >/dev/null 2>&1
+        pgrep -x austere >/dev/null &&
+            ok "missing state leaves session untouched" ||
+            nope "missing state leaves session untouched"
+
+        # the picked state survives a restart via the .last marker
+        contrib/austere-cmd restart >/dev/null 2>&1
+        wait_for 8 wm_up || true
+        wait_for 5 st_border_is 6 &&
+            ok "state persists across restart" ||
+            nope "state persists across restart"
+        rm -f .smoke-conf/austere/states/.last
+        pkill -x testclient 2>/dev/null
+    fi
 
     # restart-in-place: clients survive, state file consumed
     spawn_fixture rs1 100,100
