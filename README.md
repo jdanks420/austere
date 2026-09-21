@@ -1,6 +1,6 @@
 # austere
 
-<p align="center"><img src="logo_black.svg" alt="austere" width="96"></p>
+<p align="center"><img src="logo_white.svg" alt="austere" width="96"></p>
 
 A low-spec X11 desktop shell: tiling/stacking/floating window manager,
 modular status bar, and runtime settings menu — in C11 against raw
