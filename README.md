@@ -10,60 +10,43 @@ connection, one `poll()` loop.
 
 ## Installation
 
-### Dependencies
+Install the dependencies for your distribution, then build and install.
+Three copy-paste blocks and you're done.
 
-| library | purpose | Debian / Ubuntu | Arch | Fedora |
-|---|---|---|---|---|
-| libxcb | X11 client library | `libxcb1-dev` | `libxcb` | `libxcb-devel` |
-| xcb-util-keysyms | keycode ↔ keysym tables | `libxcb-keysyms1-dev` | `xcb-util-keysyms` | `xcb-util-keysyms-devel` |
-| xcb-util-icccm | EWMH / ICCCM helpers | `libxcb-icccm4-dev` | `xcb-util-wm` | `xcb-util-wm-devel` |
-| xcb-randr | monitor hotplug & geometry | `libxcb-randr0-dev` | `libxcb` | `xcb-util-randr-devel` |
-| xcb-xtest | XTEST | `libxcb-xtest0-dev` | `libxcb` | `xcb-util-xtest-devel` |
-| xcb-shape | rounded corners | `libxcb-shape0-dev` | `libxcb` | `libxcb-devel` |
-| fontconfig | font matching | `libfontconfig1-dev` | `fontconfig` | `fontconfig-devel` |
-| freetype2 | text rasterization | `libfreetype6-dev` | `freetype2` | `freetype-devel` |
-| pkg-config | build | `pkg-config` | `pkgconf` | `pkgconf-pkg-config` |
-| imlib2 *(optional)* | wallpaper thumbnails | `libimlib2-dev` | `imlib2` | `imlib2-devel` |
-
-Package names vary by release — search your distribution for the xcb-util
-libraries if one is missing. Build with `AUSTERE_NO_IMLIB2=1` to omit the
-Imlib2 dependency entirely. The TOML parser ([tomlc17](3rdparty/)) is
-vendored and needs nothing extra.
-
-### Build
+**Debian / Ubuntu**
 
 ```sh
-make            # cc -std=c11 -Wall -Wextra -Werror -pedantic
+sudo apt install -y git build-essential pkg-config libxcb1-dev libxcb-keysyms1-dev libxcb-icccm4-dev libxcb-randr0-dev libxcb-xtest0-dev libxcb-shape0-dev libfontconfig1-dev libfreetype6-dev libimlib2-dev
 ```
 
-Wallpaper thumbnails require Imlib2 (default on). To build without it:
+**Arch Linux**
 
 ```sh
-make AUSTERE_NO_IMLIB2=1
+sudo pacman -S --needed base-devel git libxcb xcb-util-keysyms xcb-util-wm fontconfig freetype2 imlib2
 ```
 
-### Install
+**Fedora**
 
 ```sh
-sudo make install            # PREFIX=/usr/local by default
+sudo dnf install -y git gcc make pkgconf-pkg-config libxcb-devel xcb-util-keysyms-devel xcb-util-wm-devel xcb-util-randr-devel xcb-util-xtest-devel fontconfig-devel freetype-devel imlib2-devel
 ```
 
-Installs the `austere` binary, the `austere-cmd` CLI, and
-`contrib/austere.desktop` as a display-manager session, so `austere` shows
-up in the login screen's session list. Override the prefix or use
-`DESTDIR` for packaging:
+**Any distribution** — clone, build, install:
 
 ```sh
-make install PREFIX=/usr DESTDIR="$pkgdir"
+git clone https://github.com/jdanks420/austere
+cd austere
+make
+sudo make install
 ```
 
-To remove:
+*Package names vary by release — search your distribution for these if
+one is missing. Remove with `sudo make uninstall`. Wallpaper thumbnails
+need Imlib2 (default); build with `make AUSTERE_NO_IMLIB2=1` to skip it.
+The TOML parser ([tomlc17](3rdparty/)) is vendored, so nothing else is
+required.*
 
-```sh
-sudo make uninstall
-```
-
-### Start
+## Starting austere
 
 Pick **austere** as the session in your display manager, or start it
 manually:
