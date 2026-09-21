@@ -9,7 +9,7 @@
 #include "welcome.h"
 
 static const char *const essentials[] = {
-    "super+space         terminal (kitty)",
+    "super+Return        terminal (kitty)",
     "alt+space           launcher",
     "alt+Tab             window switcher",
     "super+e             settings menu",

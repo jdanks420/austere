@@ -247,17 +247,27 @@ free_rows(void)
     rows_n = 0;
 }
 
-/* Run a module template with %s replaced; returns malloc'd command. */
+/* Run a module template with %s replaced; returns malloc'd command.
+ * Sized for one args splice per %s occurrence (never assume shrinkage). */
 static char *
 module_expand(unsigned mi, const char *args)
 {
     const char *tmpl = cfg.mod_cmd[mi];
-    char *cmd = xmalloc(strlen(tmpl) + strlen(args) + 1);
+    const size_t alen = strlen(args);
+    unsigned ns = 0;
+
+    for (const char *p = tmpl; *p; p++)
+        if (p[0] == '%' && p[1] == 's') {
+            ns++;
+            p++;
+        }
+    char *cmd = xmalloc(strlen(tmpl) + ns * alen + 1);
     unsigned o = 0;
 
     for (const char *p = tmpl; *p; p++) {
         if (p[0] == '%' && p[1] == 's') {
-            o += (unsigned)sprintf(cmd + o, "%s", args);
+            memcpy(cmd + o, args, alen);
+            o += (unsigned)alen;
             p++;
         } else {
             cmd[o++] = *p;
@@ -393,14 +403,14 @@ launcher_open(wm_t *wm)
     rows_n = 0;
 
     /* history first (most recent at top) */
-    for (unsigned i = 0; i < L.nhist; i++) {
+    for (unsigned i = 0; i < L.nhist && rows_n < MAX_ENTRIES + 63; i++) {
         rows_mem[rows_n] = xstrdup(L.hist[i]);
         row_cmds[rows_n] = NULL;
         rows_n++;
     }
 
     /* conf entries: label on the row, command kept for Enter */
-    for (unsigned i = 0; i < cfg.nlauncher_entries; i++) {
+    for (unsigned i = 0; i < cfg.nlauncher_entries && rows_n < MAX_ENTRIES + 63; i++) {
         char buf[256];
 
         snprintf(buf, sizeof(buf), "%s", cfg.launcher_entries[i]);
@@ -415,7 +425,7 @@ launcher_open(wm_t *wm)
     }
 
     /* prefix modules: "name - desc" */
-    for (unsigned i = 0; i < cfg.nmodules; i++) {
+    for (unsigned i = 0; i < cfg.nmodules && rows_n < MAX_ENTRIES + 63; i++) {
         char buf[256];
 
         snprintf(buf, sizeof(buf), "%s - %s", cfg.mod_name[i],

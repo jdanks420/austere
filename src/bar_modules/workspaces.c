@@ -5,6 +5,7 @@
 #include "../bar.h"
 #include "../barmod.h"
 #include "../draw.h"
+#include "../settings.h"
 #include <stdio.h>
 
 #include "../workspace.h"
@@ -49,11 +50,11 @@ walk(wm_t *wm, monitor_t *mon, int x, bool draw, int rel_x, int *hit,
             uint32_t col = base_col;
 
             if (ws_shown(i))
-                col = fm && fm->ws_visible == i ? BAR_ACCENT : BAR_DIM;
+                col = fm && fm->ws_visible == i ? cfg.focus_color : BAR_DIM;
             if (workspaces[i].urgent)
-                col = BAR_URGENT;
+                col = cfg.urgent_color;
             draw_text(wm, &mon->bar->draw, f, x + cx + (int)pad,
-                bar_baseline(wm, mon, f), buf, (unsigned)len, col, BAR_BG);
+                bar_baseline(wm, mon, f), buf, (unsigned)len, col, cfg.bar_bg);
         } else if (rel_x >= cx && rel_x < (int)(cx + w)) {
             *hit = (int)i;
         }
@@ -62,16 +63,16 @@ walk(wm_t *wm, monitor_t *mon, int x, bool draw, int rel_x, int *hit,
     return (unsigned)cx;
 }
 
-unsigned
+static unsigned
 wsmod_render(wm_t *wm, monitor_t *mon, module_t *m, int x, bool draw)
 {
     font_t *f = bar_font(wm, m);
 
     return walk(wm, mon, x, draw, -1, NULL, f,
-        bar_color(m, BAR_FG));
+        bar_color(m, cfg.bar_fg));
 }
 
-void
+static void
 wsmod_click(wm_t *wm, monitor_t *mon, module_t *m, int mod_x, int px,
     unsigned btn)
 {
@@ -80,6 +81,8 @@ wsmod_click(wm_t *wm, monitor_t *mon, module_t *m, int mod_x, int px,
     (void)mon;
     (void)m;
     (void)mod_x;
+    /* px is the pointer position relative to the module start, so the
+     * walk's cx offsets line up with rel_x */
     if (btn != XCB_BUTTON_INDEX_1)
         return;
     walk(wm, mon, 0, false, px, &hit, bar_font(wm, m), 0);

@@ -12,8 +12,6 @@
 #include "util.h"
 #include "workspace.h"
 
-#define EWMH_DESKTOP_ALL 0xFFFFFFFFu
-
 void
 ewmh_init(wm_t *wm)
 {
@@ -28,6 +26,7 @@ ewmh_init(wm_t *wm)
         a->net_current_desktop,
         a->net_wm_desktop,
         a->net_wm_state,
+        a->net_wm_state_fullscreen,
         a->net_wm_state_demands_attention,
     };
     uint32_t ndesktops = WS_MAX;
@@ -106,77 +105,87 @@ ewmh_update_current_desktop(wm_t *wm)
 
 static bool
 state_has(xcb_connection_t *conn, xcb_atom_t state_atom,
-    xcb_window_t win, xcb_atom_t wanted, uint32_t *n_out)
+    xcb_window_t win, xcb_atom_t wanted)
 {
+    /* property input is client-controlled: only treat a reply as an
+     * atom array when type AND format match. */
     xcb_get_property_reply_t *r =
         xcb_get_property_reply(conn,
             xcb_get_property(conn, 0, win, state_atom, XCB_ATOM_ATOM, 0, 64),
             NULL);
     bool found = false;
-    uint32_t n = 0;
 
-    if (!r)
-        return false;
-    xcb_atom_t *atoms = xcb_get_property_value(r);
-    n = r->value_len;
-    for (uint32_t i = 0; i < n; i++)
-        if (atoms[i] == wanted)
-            found = true;
+    if (r && r->type == XCB_ATOM_ATOM && r->format == 32) {
+        xcb_atom_t *atoms = xcb_get_property_value(r);
+
+        for (uint32_t i = 0; i < r->value_len; i++)
+            if (atoms[i] == wanted) {
+                found = true;
+                break;
+            }
+    }
     free(r);
-    if (n_out)
-        *n_out = n;
     return found;
+}
+
+/* Drop drop from win's validated state property and rewrite it. */
+static void
+state_del(xcb_connection_t *conn, xcb_atom_t state_atom,
+    xcb_window_t win, xcb_atom_t drop)
+{
+    xcb_atom_t kept[64];
+    unsigned m = 0;
+    xcb_get_property_reply_t *r = xcb_get_property_reply(conn,
+        xcb_get_property(conn, 0, win, state_atom, XCB_ATOM_ATOM, 0, 64),
+        NULL);
+
+    if (r && r->type == XCB_ATOM_ATOM && r->format == 32) {
+        xcb_atom_t *atoms = xcb_get_property_value(r);
+
+        for (uint32_t i = 0; i < r->value_len; i++)
+            if (atoms[i] != drop && m < sizeof(kept) / sizeof(kept[0]))
+                kept[m++] = atoms[i];
+    }
+    free(r);
+    xcb_change_property(conn, XCB_PROP_MODE_REPLACE, win, state_atom,
+        XCB_ATOM_ATOM, 32, m, kept);
 }
 
 void
 ewmh_set_demands_attention(wm_t *wm, client_t *c, bool on)
 {
     atoms_t *a = wm->atoms;
-    bool has;
-    uint32_t n;
+    xcb_atom_t att = a->net_wm_state_demands_attention;
 
-    has = state_has(wm->conn, a->net_wm_state, c->win,
-        a->net_wm_state_demands_attention, &n);
-    if (on == has)
+    if (on == state_has(wm->conn, a->net_wm_state, c->win, att))
         return;
-
-    if (on) {
+    if (on)
         xcb_change_property(wm->conn, XCB_PROP_MODE_APPEND, c->win,
-            a->net_wm_state, XCB_ATOM_ATOM, 32, 1,
-            &a->net_wm_state_demands_attention);
-    } else if (n > 0) {
-        xcb_atom_t kept[64];
-        xcb_get_property_reply_t *r =
-            xcb_get_property_reply(wm->conn,
-                xcb_get_property(wm->conn, 0, c->win, a->net_wm_state,
-                    XCB_ATOM_ATOM, 0, 64), NULL);
-        uint32_t m = 0;
-
-        if (!r)
-            return;
-        xcb_atom_t *atoms = xcb_get_property_value(r);
-        for (uint32_t i = 0; i < r->value_len; i++)
-            if (atoms[i] != a->net_wm_state_demands_attention &&
-                m < sizeof(kept) / sizeof(kept[0]))
-                kept[m++] = atoms[i];
-        free(r);
-        xcb_change_property(wm->conn, XCB_PROP_MODE_REPLACE, c->win,
-            a->net_wm_state, XCB_ATOM_ATOM, 32, m, kept);
-    }
+            a->net_wm_state, XCB_ATOM_ATOM, 32, 1, &att);
+    else
+        state_del(wm->conn, a->net_wm_state, c->win, att);
 }
 
 void
 ewmh_update_workarea(wm_t *wm)
 {
+    uint32_t workarea[WS_MAX * 4];
+    Rect a;
     monitor_t *m = focused_mon(wm);
 
     if (!m)
         return;
-    Rect a = mon_workarea(m);
-
+    memset(workarea, 0, sizeof(workarea));
+    a = mon_workarea(m);
+    for (unsigned i = 0; i < WS_MAX; i++) {
+        workarea[i * 4 + 0] = (uint32_t)a.x;
+        workarea[i * 4 + 1] = (uint32_t)a.y;
+        workarea[i * 4 + 2] = a.w;
+        workarea[i * 4 + 3] = a.h;
+    }
     xcb_change_property(wm->conn, XCB_PROP_MODE_REPLACE, wm->scr->root,
-        wm->atoms->net_workarea, XCB_ATOM_CARDINAL, 32, 4,
-        (uint32_t[]){ (uint32_t)a.x, (uint32_t)a.y, a.w, a.h });
+        wm->atoms->net_workarea, XCB_ATOM_CARDINAL, 32,
+        WS_MAX * 4, workarea);
 }
 
 void
@@ -184,28 +193,11 @@ ewmh_set_fullscreen(wm_t *wm, client_t *c, bool on)
 {
     atoms_t *a = wm->atoms;
 
-    if (on) {
+    if (on)
         xcb_change_property(wm->conn, XCB_PROP_MODE_REPLACE, c->win,
             a->net_wm_state, XCB_ATOM_ATOM, 32, 1,
             &a->net_wm_state_fullscreen);
-    } else {
-        xcb_atom_t kept[8];
-        unsigned m = 0;
-
-        xcb_get_property_reply_t *r = xcb_get_property_reply(wm->conn,
-            xcb_get_property(wm->conn, 0, c->win, a->net_wm_state,
-                XCB_ATOM_ATOM, 0, 32),
-            NULL);
-        if (r) {
-            xcb_atom_t *atoms =
-                xcb_get_property_value(r);
-            for (uint32_t i = 0; i < r->value_len; i++)
-                if (atoms[i] != a->net_wm_state_fullscreen &&
-                    m < 8)
-                    kept[m++] = atoms[i];
-            free(r);
-        }
-        xcb_change_property(wm->conn, XCB_PROP_MODE_REPLACE, c->win,
-            a->net_wm_state, XCB_ATOM_ATOM, 32, m, kept);
-    }
+    else
+        state_del(wm->conn, a->net_wm_state, c->win,
+            a->net_wm_state_fullscreen);
 }

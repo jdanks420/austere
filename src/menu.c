@@ -9,6 +9,7 @@
 #include "bar.h"
 #include "client.h"
 #include "conf.h"
+#include "deco.h"
 #include "draw.h"
 #include "keys.h"
 #include "layout.h"
@@ -23,7 +24,6 @@
 #include <xcb/xcb_keysyms.h>
 
 #define ROW_H_MIN 16
-#define MENU_W_FRAC 2 /* half the monitor: two columns */
 #define MAX_ROWS 96
 
 static unsigned row_h_cache;
@@ -63,8 +63,9 @@ typedef struct {
     int *ival;
     int istep, ilo, ihi;
     double *dval;
-    double dstep;
+    double dstep, dlo, dhi;
     char **sval;
+    uint32_t *uval;
     const char *const *enames;
     int (*eget)(void);
     void (*eset)(int);
@@ -90,7 +91,8 @@ static int edit_mode; /* 0 nav, 1 text edit, 2 bind capture */
 static char editbuf[128];
 
 static const char *const pos_names[] = { "top", "bottom", NULL };
-static const char *const layout_names[] = { "tile", "monocle", NULL };
+static const char *const layout_names[] = { "tile", "monocle", "float",
+    NULL };
 static const char *const mod_names[] = { "alt", "super", NULL };
 static const char *const scope_names[] = { "all", "monitor", NULL };
 
@@ -122,13 +124,16 @@ static void pos_set(int i)
 
 static int layout_get(void)
 {
-    return strcmp(cfg.default_layout, "monocle") == 0 ? 1 : 0;
+    for (unsigned i = 0; layout_names[i]; i++)
+        if (!strcmp(cfg.default_layout, layout_names[i]))
+            return (int)i;
+    return 0;
 }
 
 static void layout_set(int i)
 {
     free(cfg.default_layout);
-    cfg.default_layout = xstrdup(i ? "monocle" : "tile");
+    cfg.default_layout = xstrdup(layout_names[i]);
 }
 
 static int modmask_get(void)
@@ -178,11 +183,11 @@ gen_rows(void)
     r->ilo = 0;
     r->ihi = 32;
     r = add_row(R_COLOR, 0, "focus_color");
-    r->sval = (char **)&cfg.focus_color;
+    r->uval = &cfg.focus_color;
     r = add_row(R_COLOR, 0, "unfocus_color");
-    r->sval = (char **)&cfg.unfocus_color;
+    r->uval = &cfg.unfocus_color;
     r = add_row(R_COLOR, 0, "urgent_color");
-    r->sval = (char **)&cfg.urgent_color;
+    r->uval = &cfg.urgent_color;
     r = add_row(R_INT, 0, "gap");
     r->ival = (int *)&cfg.gap;
     r->istep = 1;
@@ -198,6 +203,19 @@ gen_rows(void)
     r = add_row(R_STR, 0, "font");
     r->sval = &cfg.font;
 
+    add_row(R_HDR, 0, "deco");
+    r = add_row(R_BOOL, 0, "deco");
+    r->bval = &cfg.deco;
+    r = add_row(R_INT, 0, "deco_title_h");
+    r->ival = (int *)&cfg.deco_title_h;
+    r->istep = 1;
+    r->ilo = 10;
+    r->ihi = 40;
+    r = add_row(R_COLOR, 0, "deco_border");
+    r->uval = &cfg.deco_border;
+    r = add_row(R_COLOR, 0, "deco_unfocus_border");
+    r->uval = &cfg.deco_unfocus_border;
+
     add_row(R_HDR, 0, "bar");
     r = add_row(R_ENUM, 0, "position");
     r->enames = pos_names;
@@ -206,9 +224,9 @@ gen_rows(void)
     r = add_row(R_STR, 0, "time_format");
     r->sval = &cfg.time_format;
     r = add_row(R_COLOR, 0, "bar_bg");
-    r->sval = (char **)&cfg.bar_bg;
+    r->uval = &cfg.bar_bg;
     r = add_row(R_COLOR, 0, "bar_fg");
-    r->sval = (char **)&cfg.bar_fg;
+    r->uval = &cfg.bar_fg;
     r = add_row(R_INT, 0, "bar_gap");
     r->ival = (int *)&cfg.bar_gap;
 
@@ -243,9 +261,13 @@ gen_rows(void)
     r = add_row(R_DBL, 0, "split_ratio");
     r->dval = &cfg.split_ratio;
     r->dstep = 0.05;
+    r->dlo = 0.1;
+    r->dhi = 0.9;
     r = add_row(R_DBL, 0, "ratio_step");
     r->dval = &cfg.ratio_step;
     r->dstep = 0.01;
+    r->dlo = 0.01;
+    r->dhi = 0.5;
 
     add_row(R_HDR, 0, "wallpaper");
     r = add_row(R_STR, 0, "setter_command");
@@ -328,7 +350,7 @@ row_value(const row_t *r, char *out, unsigned outsz)
         snprintf(out, outsz, "%s", *r->sval ? *r->sval : "");
         break;
     case R_COLOR: {
-        uint32_t v = *(uint32_t *)r->sval;
+        uint32_t v = *r->uval;
 
         snprintf(out, outsz, "#%06x", v);
         break;
@@ -351,6 +373,9 @@ row_value(const row_t *r, char *out, unsigned outsz)
         if (id == ACT_VIEW_WS || id == ACT_SEND_WS)
             snprintf(out, outsz, "%s %s %d", combo,
                 action_name(id), r->bind->arg);
+        else if (id == ACT_EXEC)
+            snprintf(out, outsz, "%s %s %s", combo,
+                action_name(id), r->bind->cmd);
         else
             snprintf(out, outsz, "%s %s", combo, action_name(id));
         break;
@@ -362,16 +387,26 @@ row_value(const row_t *r, char *out, unsigned outsz)
 
 /* ---- drawing ------------------------------------------------------- */
 
-static unsigned
-menu_height(void)
+/* Natural height capped to the focused workarea; nvis is how many
+ * rows fit. Both columns scroll in lockstep via the base offset, so
+ * tall configs stay usable on short screens. */
+static void
+menu_metrics(wm_t *wm, unsigned *h, unsigned *nvis)
 {
     unsigned left = 0, right = 0;
 
     for (unsigned i = 0; i < nrows; i++)
         rows[i].col ? right++ : left++;
     unsigned m = left > right ? left : right;
+    unsigned natural = m * row_h() + 2 * row_h(); /* title + rows */
+    monitor_t *mon = focused_mon(wm);
+    Rect a = mon_workarea(mon);
+    unsigned top = 2 * row_h();
 
-    return m * row_h() + 3 * row_h(); /* title + rows + footer */
+    *h = natural < a.h ? natural : a.h;
+    if (*h < top)
+        *h = top;
+    *nvis = (*h - top) / row_h();
 }
 
 static bool panel_mode;
@@ -385,19 +420,29 @@ menu_draw(wm_t *wm)
     }
     monitor_t *mon = focused_mon(wm);
     unsigned w = mon->geom.w / 2;
-    unsigned h = menu_height();
+    unsigned h, nvis;
+
+    menu_metrics(wm, &h, &nvis);
     font_t *f = draw_ui_font(wm);
 
-    draw_rect(wm, &draw, 0, 0, w, h, 0x181818);
-    draw_rect(wm, &draw, 0, 0, w, row_h(), 0x242424);
-    draw_text(wm, &draw, f, 6, row_h() - 5, "austere settings", 15,
-        0xdddddd, 0x242424);
+    uint32_t bg = cfg.bar_bg;
+    uint32_t fg = cfg.bar_fg;
+    uint32_t ac = cfg.focus_color;
+
+    draw_rect(wm, &draw, 0, 0, w, h, bg);
+    draw_rect(wm, &draw, 0, 0, w, row_h(), bg);
+    draw_text(wm, &draw, f, 6, row_h() - 5, "austere settings", 15, fg,
+        bg);
 
     unsigned col_x[2] = { 6, w / 2 + 6 };
     unsigned col_w[2] = { w / 2 - 12, w / 2 - 12 };
     unsigned y[2] = { row_h() + 2, row_h() + 2 };
+    unsigned base = nvis && (unsigned)sel >= nvis
+        ? (unsigned)sel - nvis + 1
+        : 0;
+    unsigned end = base + nvis > nrows ? nrows : base + nvis;
 
-    for (unsigned i = 0; i < nrows; i++) {
+    for (unsigned i = base; i < end; i++) {
         row_t *r = &rows[i];
         int cx = (int)col_x[r->col];
         unsigned cwid = col_w[r->col];
@@ -405,26 +450,39 @@ menu_draw(wm_t *wm)
 
         if (r->type == R_HDR) {
             draw_text(wm, &draw, f, cx, by + row_h() - 5, r->label,
-                (unsigned)strlen(r->label), 0x888888, 0x181818);
+                (unsigned)strlen(r->label), BAR_DIM, bg);
             y[r->col] += row_h();
             continue;
         }
         bool is_sel = (int)i == sel;
 
         if (is_sel)
-            draw_rect(wm, &draw, cx - 3, by, cwid, row_h(), 0x2c3e50);
-        uint32_t fg = is_sel ? 0xffffff : 0xbbbbbb;
-        uint32_t rowbg = is_sel ? 0x2c3e50 : 0x181818;
+            draw_rect(wm, &draw, cx - 3, by, cwid, row_h(), ac);
+        uint32_t rowbg = is_sel ? ac : bg;
+        uint32_t rowfg = is_sel ? bg : fg;
 
         draw_text(wm, &draw, f, cx, by + row_h() - 5, r->label,
-            (unsigned)strlen(r->label), fg, rowbg);
+            (unsigned)strlen(r->label), rowfg, rowbg);
         char val[128];
         row_value(r, val, sizeof(val));
         unsigned vw = draw_text_w(wm, f, val, (unsigned)strlen(val));
         draw_text(wm, &draw, f, (int)(cx + cwid - vw), by + row_h() - 5,
             val, (unsigned)strlen(val),
-            r->type == R_BIND ? 0x9fb8c8 : fg, rowbg);
+            r->type == R_BIND ? BAR_DIM : rowfg, rowbg);
         y[r->col] += row_h();
+    }
+    if (nrows > nvis && nvis) {
+        unsigned rows_h = h - 2 * row_h();
+        unsigned rh = rows_h * nvis / nrows;
+
+        if (rh < 2)
+            rh = 2;
+        if (rh > rows_h)
+            rh = rows_h;
+        unsigned rt = (rows_h - rh) * base / (nrows - nvis);
+
+        draw_rect(wm, &draw, (int)(w - 4), (int)(row_h() + rt), 2,
+            rh, BAR_DIM);
     }
 
     /* footer / prompt */
@@ -432,16 +490,15 @@ menu_draw(wm_t *wm)
         ? "press new combo  (Esc cancels)"
         : edit_mode == 1
         ? "value: _  (Return accepts, Esc cancels)"
-        : "arrows adjust - Tab column - Ctrl+s save - Esc close";
+        : "arrows adjust - Tab column - PgDn scroll - Ctrl+s save - Esc close";
     unsigned fh = h - row_h() + 4;
 
-    draw_rect(wm, &draw, 0, (int)(h - row_h()), w, row_h(), 0x242424);
+    draw_rect(wm, &draw, 0, (int)(h - row_h()), w, row_h(), bg);
     draw_text(wm, &draw, f, 6, (int)(fh + 2), hint,
-        (unsigned)strlen(hint), edit_mode ? 0xffcc66 : 0x888888,
-        0x242424);
+        (unsigned)strlen(hint), edit_mode ? ac : BAR_DIM, bg);
     if (edit_mode == 1)
         draw_text(wm, &draw, f, 60, (int)(fh + 2), editbuf,
-            (unsigned)strlen(editbuf), 0xffffff, 0x242424);
+            (unsigned)strlen(editbuf), fg, bg);
 }
 
 /* ---- application menu ------------------------------------------------ */
@@ -487,41 +544,52 @@ apps_l1_close(wm_t *wm)
     apps_open_cat(wm, (unsigned)c);
 }
 
+static char **apps_rows;
+static unsigned napps_rows;
+
+static void apps_l2_close(wm_t *wm);
+
+static void
+apps_rows_free(void)
+{
+    for (unsigned i = 0; i < napps_rows; i++)
+        free(apps_rows[i]);
+    free(apps_rows);
+    apps_rows = NULL;
+    napps_rows = 0;
+}
+
 static void
 apps_open_cat(wm_t *wm, unsigned cat)
 {
-    static char **rows;
-    static unsigned n;
-
-    free(rows);
-    rows = NULL;
-    n = 0;
+    apps_rows_free();
     for (unsigned i = 0; i < apps_count(); i++)
         if (app_category(i) == (int)cat)
-            n++;
-    if (!n)
+            napps_rows++;
+    if (!napps_rows)
         return;
-    rows = xmalloc(n * sizeof(char *));
+    apps_rows = xmalloc(napps_rows * sizeof(char *));
     unsigned k = 0;
 
     for (unsigned i = 0; i < apps_count(); i++)
         if (app_category(i) == (int)cat)
-            rows[k++] = xstrdup(app_name(i));
-    for (unsigned a = 0; a + 1 < n; a++)
-        for (unsigned b = a + 1; b < n; b++)
-            if (strcasecmp(rows[a], rows[b]) > 0) {
-                char *t = rows[a];
-
-                rows[a] = rows[b];
-                rows[b] = t;
-            }
+            apps_rows[k++] = xstrdup(app_name(i));
+    sort_strs(apps_rows, napps_rows, true);
     panel_def_t def = {
-        .title = app_category_name(cat), .prompt = "", .rows = rows,
-        .nrows = n, .filter = true, .on_enter = apps_l2_enter,
-        .px_w = 320, .anchor_bar = true
+        .title = app_category_name(cat), .prompt = "", .rows = apps_rows,
+        .nrows = napps_rows, .filter = true, .on_enter = apps_l2_enter,
+        .on_close = apps_l2_close, .px_w = 320, .anchor_bar = true
     };
 
     panel_open(wm, &def);
+}
+
+static void
+apps_l2_close(wm_t *wm)
+{
+    (void)wm;
+
+    apps_rows_free();
 }
 
 void
@@ -622,18 +690,14 @@ panel_refilter(void)
             if (ncasestr(pdef.rows[i], pinput) &&
                 strncasecmp(pdef.rows[i], pinput, plen) != 0)
                 pview[pview_n++] = pdef.rows[i];
-        qsort(pview, nprefix, sizeof(char *), cmp_str);
-        qsort(pview + nprefix, pview_n - nprefix, sizeof(char *),
-            cmp_str);
+        if (nprefix > 1)
+            qsort(pview, nprefix, sizeof(char *), cmp_str);
+        if (pview_n - nprefix > 1)
+            qsort(pview + nprefix, pview_n - nprefix, sizeof(char *),
+                cmp_str);
     }
     if (psel >= pview_n)
         psel = pview_n ? pview_n - 1 : 0;
-}
-
-const char *
-panel_input(void)
-{
-    return pinput;
 }
 
 void
@@ -674,17 +738,17 @@ panel_layout(wm_t *wm, int *rx, int *ry, unsigned *rw, unsigned *rh,
         y = a.y + g;
     } else {
         w = mon->geom.w * 3 / 5;
-        h = (pview_n < (a.h - 4 * row_h()) / row_h()
-                ? pview_n : (a.h - 4 * row_h()) / row_h())
-            * row_h() + 3 * row_h();
+        h = (pview_n < (a.h - 3 * row_h()) / row_h()
+                ? pview_n : (a.h - 3 * row_h()) / row_h())
+            * row_h() + 2 * row_h();
         x = a.x + (int)((a.w - w) / 2);
         y = a.y + (int)((a.h - h) / 2);
     }
-    unsigned max_vis = (h - 3 * row_h()) / row_h();
+    unsigned max_vis = (h - 2 * row_h()) / row_h();
     unsigned nvis = pview_n < max_vis ? pview_n : max_vis;
 
     if (!pdef.anchor_bar)
-        h = nvis * row_h() + 3 * row_h();
+        h = nvis * row_h() + 2 * row_h();
     *rx = x;
     *ry = y;
     *rw = w;
@@ -714,10 +778,14 @@ panel_draw(wm_t *wm)
         cur_x = px;
         cur_y = py;
     }
-    draw_rect(wm, &draw, 0, 0, w, h, 0x181818);
-    draw_rect(wm, &draw, 0, 0, w, row_h(), 0x242424);
+    uint32_t bg = cfg.bar_bg;
+    uint32_t fg = cfg.bar_fg;
+    uint32_t ac = cfg.focus_color;
+
+    draw_rect(wm, &draw, 0, 0, w, h, bg);
+    draw_rect(wm, &draw, 0, 0, w, row_h(), bg);
     draw_text(wm, &draw, f, 6, row_h() - 5, ptitle,
-        (unsigned)strlen(ptitle), 0xdddddd, 0x242424);
+        (unsigned)strlen(ptitle), fg, bg);
 
     for (unsigned i = 0; i < nvis; i++) {
         const char *row = pview[base + i];
@@ -725,11 +793,11 @@ panel_draw(wm_t *wm)
 
         if (selected)
             draw_rect(wm, &draw, 3, (int)(row_h() + i * row_h()),
-                w - 6, row_h(), 0x2c3e50);
+                w - 6, row_h(), ac);
         draw_text(wm, &draw, f, 6, (int)(row_h() + i * row_h() + row_h() - 5),
             row, (unsigned)strlen(row),
-            selected ? 0xffffff : 0xbbbbbb,
-            selected ? 0x2c3e50 : 0x181818);
+            selected ? bg : fg,
+            selected ? ac : bg);
     }
 
     /* prompt line with input + optional module hint */
@@ -740,14 +808,29 @@ panel_draw(wm_t *wm)
     if (pl < 0)
         pl = 0;
     snprintf(line + pl, sizeof(line) - (size_t)pl, "%s", pinput);
-    draw_rect(wm, &draw, 0, (int)(h - 2 * row_h()), w, row_h(), 0x242424);
-    draw_text(wm, &draw, f, 6, (int)(h - 2 * row_h() + row_h() - 5), line,
-        (unsigned)strlen(line), 0xffffff, 0x242424);
+    draw_rect(wm, &draw, 0, (int)(h - row_h()), w, row_h(), bg);
+    draw_text(wm, &draw, f, 6, (int)(h - row_h() + row_h() - 5), line,
+        (unsigned)strlen(line), fg, bg);
+}
 
-    draw_rect(wm, &draw, 0, (int)(h - row_h()), w, row_h(), 0x1e1e1e);
-    const char *foot = "type to filter - Enter run - Tab complete - Esc";
-    draw_text(wm, &draw, f, 6, (int)(h - row_h() + 3), foot,
-        (unsigned)strlen(foot), 0x777777, 0x1e1e1e);
+static void
+panel_gc_take(wm_t *wm, xcb_window_t w)
+{
+    /* win/gc are shared between the settings window and panel windows;
+     * only one is live at a time, but the static draw_t must not
+     * accumulate GCs across open/close cycles. */
+    if (draw.gc)
+        xcb_free_gc(wm->conn, draw.gc);
+    draw_setup(wm, &draw, w);
+}
+
+static void
+panel_gc_drop(wm_t *wm)
+{
+    if (draw.gc) {
+        xcb_free_gc(wm->conn, draw.gc);
+        draw.gc = 0;
+    }
 }
 
 static void
@@ -765,17 +848,14 @@ panel_create_window(wm_t *wm)
         XCB_COPY_FROM_PARENT,
         XCB_CW_OVERRIDE_REDIRECT | XCB_CW_BACK_PIXEL |
             XCB_CW_EVENT_MASK,
-        (uint32_t[]){ 0x181818, 1,
+        (uint32_t[]){ cfg.bar_bg, 1,
             XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_KEY_PRESS |
                 XCB_EVENT_MASK_BUTTON_PRESS });
     draw_setup(wm, &draw, win);
     cur_w = w;
     cur_h = h;
     xcb_map_window(wm->conn, win);
-    uint32_t above = XCB_STACK_MODE_ABOVE;
-
-    xcb_configure_window(wm->conn, win, XCB_CONFIG_WINDOW_STACK_MODE,
-        &above);
+    raise_window(wm, win);
 }
 
 static void
@@ -803,6 +883,7 @@ panel_finish(wm_t *wm, bool run_enter)
     pinput[0] = '\0';
     memset(&pdef, 0, sizeof(pdef));
     xcb_ungrab_keyboard(wm->conn, XCB_CURRENT_TIME);
+    panel_gc_drop(wm);
     xcb_destroy_window(wm->conn, win);
     win = XCB_NONE;
     if (on_close)
@@ -832,12 +913,22 @@ panel_text_key(wm_t *wm, xcb_keysym_t sym)
     return true;
 }
 
-void
+static void
+panel_preview(wm_t *wm)
+{
+    if (!pdef.on_preview || !pview_n)
+        return;
+    pdef.on_preview(wm, pview[psel]);
+    /* live switch raised the target client; keep the panel on top */
+    raise_window(wm, win);
+}
+
+static void
 panel_key(wm_t *wm, xcb_key_press_event_t *ev)
 {
     xcb_keysym_t sym = xcb_key_symbols_get_keysym(wm->keysyms,
         ev->detail, 0);
-
+    bool moved = false;
 
     switch (sym) {
     case 0xff1b: /* Escape */
@@ -847,14 +938,29 @@ panel_key(wm_t *wm, xcb_key_press_event_t *ev)
         panel_finish(wm, true);
         return;
     case 0xff52: /* Up */
-        if (pview_n)
+        if (pview_n) {
             psel = psel == 0 ? pview_n - 1 : psel - 1;
+            moved = true;
+        }
         break;
     case 0xff54: /* Down */
-        if (pview_n)
+        if (pview_n) {
             psel = psel + 1 == pview_n ? 0 : psel + 1;
+            moved = true;
+        }
         break;
     case 0xff09: /* Tab */
+        /* held-alt Tab cycles the selection (the switcher gesture);
+         * plain Tab keeps the launcher completion behaviour. */
+        if (ev->state & XCB_MOD_MASK_1) {
+            if (pview_n) {
+                psel = ev->state & XCB_MOD_MASK_SHIFT
+                    ? (psel == 0 ? pview_n - 1 : psel - 1)
+                    : (psel + 1 == pview_n ? 0 : psel + 1);
+                moved = true;
+            }
+            break;
+        }
         if (pdef.tab_complete && pinput[0]) {
             /* complete to common prefix of matching rows */
             size_t n = strlen(pinput);
@@ -882,6 +988,7 @@ panel_key(wm_t *wm, xcb_key_press_event_t *ev)
                 break;
             }
             panel_refilter();
+            moved = true;
         }
         break;
     default:
@@ -889,6 +996,8 @@ panel_key(wm_t *wm, xcb_key_press_event_t *ev)
             return;
         return;
     }
+    if (moved)
+        panel_preview(wm);
     menu_draw(wm);
 }
 
@@ -899,7 +1008,9 @@ menu_create_window(wm_t *wm)
 {
     monitor_t *mon = focused_mon(wm);
     unsigned w = mon->geom.w / 2;
-    unsigned h = menu_height();
+    unsigned h, nvis;
+
+    menu_metrics(wm, &h, &nvis);
     Rect a = mon_workarea(mon);
 
     win = xcb_generate_id(wm->conn);
@@ -910,16 +1021,14 @@ menu_create_window(wm_t *wm)
         XCB_COPY_FROM_PARENT,
         XCB_CW_OVERRIDE_REDIRECT | XCB_CW_BACK_PIXEL |
             XCB_CW_EVENT_MASK,
-        (uint32_t[]){ 0x181818, 1,
-            XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_KEY_PRESS });
-    draw_setup(wm, &draw, win);
+        (uint32_t[]){ cfg.bar_bg, 1,
+            XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_KEY_PRESS |
+            XCB_EVENT_MASK_KEY_RELEASE });
+    panel_gc_take(wm, win);
     cur_w = w;
     cur_h = h;
     xcb_map_window(wm->conn, win);
-    uint32_t above = XCB_STACK_MODE_ABOVE;
-
-    xcb_configure_window(wm->conn, win, XCB_CONFIG_WINDOW_STACK_MODE,
-        &above);
+    raise_window(wm, win);
 }
 
 void
@@ -937,10 +1046,14 @@ panel_open(wm_t *wm, const panel_def_t *def)
         def->prompt ? def->prompt : "");
     row_h_update(wm);
     panel_refilter();
+    if (psel < def->init_sel && def->init_sel < pview_n)
+        psel = def->init_sel;
     panel_create_window(wm);
     xcb_grab_keyboard(wm->conn, 0, win, XCB_CURRENT_TIME,
         XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
     is_open = true;
+    if (def->init_sel && pview_n > 1)
+        panel_preview(wm);
     menu_draw(wm);
 }
 
@@ -967,6 +1080,7 @@ menu_close(wm_t *wm)
     if (!is_open)
         return;
     xcb_ungrab_keyboard(wm->conn, XCB_CURRENT_TIME);
+    panel_gc_drop(wm);
     xcb_destroy_window(wm->conn, win);
     win = XCB_NONE;
     is_open = false;
@@ -975,10 +1089,47 @@ menu_close(wm_t *wm)
     bar_render_all(wm);
 }
 
+/* The panel/overlay window died beneath us (e.g. substructure-driven
+ * DestroyNotify): release the grab so input is never left hostage and
+ * clear state so menu_active() cannot wedge the key path on a dead
+ * window. */
+void
+menu_window_gone(wm_t *wm, xcb_window_t w)
+{
+    if (overlay_active && w == overlay.win) {
+        xcb_ungrab_keyboard(wm->conn, XCB_CURRENT_TIME);
+        overlay_active = false;
+        if (overlay.close)
+            overlay.close(wm);
+        overlay.win = XCB_NONE;
+        arrange(wm);
+        bar_render_all(wm);
+    } else if (is_open && w == win) {
+        xcb_ungrab_keyboard(wm->conn, XCB_CURRENT_TIME);
+        panel_gc_drop(wm);
+        xcb_destroy_window(wm->conn, win); /* no-op if already gone */
+        win = XCB_NONE;
+        is_open = false;
+        panel_mode = false;
+        arrange(wm);
+        bar_render_all(wm);
+    }
+}
+
 bool
 menu_active(void)
 {
     return is_open || overlay_active;
+}
+
+/* A focus change or floater re-raise while a panel is open must not
+ * bury it (launcher/settings have no preview to re-raise behind). */
+void
+menu_bump(wm_t *wm)
+{
+    if (!is_open && !overlay_active)
+        return;
+    raise_window(wm, overlay_active ? overlay.win : win);
 }
 
 bool
@@ -1058,13 +1209,7 @@ apply_all(wm_t *wm)
 {
     ungrab_keys(wm);
     grab_keys(wm);
-    for (client_t *c = wm->clients; c; c = c->next) {
-        xcb_configure_window(wm->conn, c->win,
-            XCB_CONFIG_WINDOW_BORDER_WIDTH,
-            (uint32_t[]){ cfg.border_width });
-        set_border(wm, c, wm->focused == c ? cfg.focus_color
-                                           : cfg.unfocus_color);
-    }
+    settings_reapply_clients(wm);
     bars_sync(wm);
     arrange(wm);
 }
@@ -1106,15 +1251,20 @@ commit_edit(wm_t *wm, row_t *r)
     case R_DBL: {
         double v = strtod(editbuf, &end);
 
-        if (end != editbuf)
+        if (end != editbuf) {
+            if (v < r->dlo)
+                v = r->dlo;
+            if (v > r->dhi)
+                v = r->dhi;
             *r->dval = v;
+        }
         break;
     }
     case R_COLOR: {
         uint32_t c;
 
         if (conf_parse_color(editbuf, &c))
-            *(uint32_t *)r->sval = c;
+            *r->uval = c;
         else
             popup_notify(wm, "bad color (want #rrggbb)");
         break;
@@ -1153,7 +1303,10 @@ adjust(wm_t *wm, row_t *r, int dir)
         break;
     }
     case R_DBL: {
-        *r->dval += dir * r->dstep;
+        double v = *r->dval + dir * r->dstep;
+
+        if (v >= r->dlo && v <= r->dhi)
+            *r->dval = v;
         break;
     }
     default:
@@ -1178,6 +1331,44 @@ nav(int dir)
             sel = i;
             return;
         }
+    }
+}
+
+static void
+nav_page(wm_t *wm, int dir)
+{
+    unsigned nvis, h;
+
+    menu_metrics(wm, &h, &nvis);
+    if (!nvis)
+        return;
+    for (unsigned i = 0; i < nvis; i++)
+        nav(dir);
+}
+
+static void
+nav_edge(int dir)
+{
+    int want = rows[sel].col;
+
+    if (dir < 0) {
+        for (int i = 0; i < (int)nrows; i++)
+            if (rows[i].col == want && rows[i].type != R_HDR &&
+                i < sel) {
+                sel = i;
+                return;
+            }
+        for (int i = (int)nrows - 1; i >= 0; i--)
+            if (rows[i].col == want && rows[i].type != R_HDR)
+                sel = i;
+    } else {
+        for (int i = (int)nrows - 1; i >= 0; i--)
+            if (rows[i].col == want && rows[i].type != R_HDR &&
+                i > sel)
+                sel = i;
+        for (int i = 0; i < (int)nrows; i++)
+            if (rows[i].col == want && rows[i].type != R_HDR)
+                sel = i;
     }
 }
 
@@ -1224,6 +1415,16 @@ menu_key(wm_t *wm, xcb_key_press_event_t *ev)
         if (sym == 0xff1b) { /* Escape */
             edit_mode = 0;
             menu_draw(wm);
+            return;
+        }
+        /* Grab bare keys system-wide and swallow every keystroke; a
+         * real modifier is required to keep the WM usable. */
+        unsigned mod_only = (unsigned)(state &
+            (XCB_MOD_MASK_SHIFT | XCB_MOD_MASK_CONTROL |
+            XCB_MOD_MASK_1 | XCB_MOD_MASK_4));
+
+        if (!mod_only) {
+            popup_notify(wm, "hold a modifier while pressing a key");
             return;
         }
         row_t *r = &rows[sel];
@@ -1279,6 +1480,18 @@ menu_key(wm_t *wm, xcb_key_press_event_t *ev)
     case 'j':
         nav(1);
         break;
+    case 0xff55: /* PageUp */
+        nav_page(wm, -1);
+        break;
+    case 0xff56: /* PageDown */
+        nav_page(wm, 1);
+        break;
+    case 0xff50: /* Home */
+        nav_edge(-1);
+        break;
+    case 0xff57: /* End */
+        nav_edge(1);
+        break;
     case 0xff09: /* Tab */
         switch_col();
         break;
@@ -1315,6 +1528,26 @@ menu_key(wm_t *wm, xcb_key_press_event_t *ev)
         return;
     }
     menu_draw(wm);
+}
+
+void
+menu_key_release(wm_t *wm, xcb_key_release_event_t *ev)
+{
+    xcb_keysym_t sym;
+
+    if (!is_open)
+        return;
+    sym = xcb_key_symbols_get_keysym(wm->keysyms, ev->detail, 0);
+    /* hold-alt gesture for open panels: closing on the opener's Alt
+     * release. Other key releases leave the panel alone. */
+    if (sym != 0xffe9 && sym != 0xffea) /* Alt_L / Alt_R */
+        return;
+    if (overlay_active) {
+        menu_pop_overlay(wm);
+        return;
+    }
+    if (panel_mode && pdef.hold_alt)
+        panel_finish(wm, false);
 }
 
 void

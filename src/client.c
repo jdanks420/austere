@@ -11,12 +11,14 @@
 #include "bar.h"
 #include "settings.h"
 #include "client.h"
+#include "deco.h"
 #include "monitor.h"
 #include "ewmh.h"
 #include "layout.h"
 #include "mouse.h"
 #include "util.h"
 #include "workspace.h"
+#include "menu.h"
 
 static client_t *swallow_victim_find(wm_t *wm, client_t *c);
 
@@ -128,23 +130,11 @@ manage(wm_t *wm, xcb_window_t win)
             c->pid = *(pid_t *)pv;
         free(pv);
     }
-    c->cls = NULL;
-    {
-        size_t clen = 0;
-        char *raw = (char *)get_property(wm, win, XCB_ATOM_WM_CLASS,
-            XCB_ATOM_STRING, 8, &clen);
+    c->cls = wm_class(wm, win);
 
-        if (raw && clen > 1) {
-            char *cls_part = raw + strlen(raw) + 1 < raw + clen
-                ? raw + strlen(raw) + 1
-                : raw;
-
-            c->cls = xstrdup(cls_part);
-        }
-        free(raw);
-    }
-
-    /* Transient dialogs float (ICCCM §4.2.3 + SPEC §5.3). */
+    /* Transient dialogs float (ICCCM §4.2.3 + SPEC §5.3) and must stay
+     * stacked above their parent (raise_client). */
+    c->transient_for = XCB_NONE;
     {
         xcb_window_t transient = XCB_NONE;
         size_t tlen;
@@ -153,11 +143,43 @@ manage(wm_t *wm, xcb_window_t win)
         if (tv && tlen >= sizeof(transient))
             memcpy(&transient, tv, sizeof(transient));
         free(tv);
-        if (transient != XCB_NONE && transient != wm->scr->root)
+        if (transient != XCB_NONE && transient != wm->scr->root) {
             c->floating = true;
+            c->transient_for = transient;
+        }
+    }
+
+    /* SPEC §5.3 (_NET_WM_WINDOW_TYPE, dock/dialog/toolbar classification):
+     * dialog/toolbar window types float even without WM_TRANSIENT_FOR
+     * (common in GIMP). */
+    {
+        size_t tlen = 0;
+        xcb_atom_t *types = get_property(wm, win, a->net_wm_window_type,
+            XCB_ATOM_ATOM, 32, &tlen);
+
+        for (size_t i = 0; i < tlen / sizeof(xcb_atom_t); i++)
+            if (types[i] == a->net_wm_window_type_dialog ||
+                types[i] == a->net_wm_window_type_toolbar)
+                c->floating = true;
+        free(types);
     }
 
     read_hints(wm, c, &self_positioned);
+
+    /* Detect clients that mapped with _NET_WM_STATE_FULLSCREEN already
+     * set (common for SDL games, Steam, mpv --fullscreen). */
+    {
+        size_t slen = 0;
+        xcb_atom_t *states = get_property(wm, win, a->net_wm_state,
+            XCB_ATOM_ATOM, 32, &slen);
+
+        for (size_t i = 0; i < slen / sizeof(xcb_atom_t); i++)
+            if (states[i] == a->net_wm_state_fullscreen) {
+                c->fullscreen = true;
+                break;
+            }
+        free(states);
+    }
 
     /* Windows with no placement opinion get a cascade slot so they don't
      * all pile up at the server default position. */
@@ -183,7 +205,15 @@ manage(wm_t *wm, xcb_window_t win)
     if (wm->clients)
         wm->clients->prev = c;
     wm->clients = c;
+    c->mru_prev = NULL;
+    c->mru_next = wm->mru;
+    if (wm->mru)
+        wm->mru->mru_prev = c;
+    wm->mru = c;
     wm->nclients++;
+
+    if (cfg.deco && !c->scratchpad)
+        deco_create(wm, c);
 
     xcb_map_window(wm->conn, win);
     arrange(wm);
@@ -227,6 +257,12 @@ unmanage(wm_t *wm, xcb_window_t win)
         c->next->prev = c->prev;
     if (wm->clients == c)
         wm->clients = c->next;
+    if (c->mru_prev)
+        c->mru_prev->mru_next = c->mru_next;
+    if (c->mru_next)
+        c->mru_next->mru_prev = c->mru_prev;
+    if (wm->mru == c)
+        wm->mru = c->mru_next;
     wm->nclients--;
 
     xcb_delete_property(wm->conn, win, wm->atoms->net_wm_desktop);
@@ -253,6 +289,8 @@ unmanage(wm_t *wm, xcb_window_t win)
     }
     if (c->swallowed_by)
         c->swallowed_by->swallow_victim = NULL;
+    if (c->deco)
+        deco_destroy(wm, c);
     free(c);
     ws_recompute_urgent(wm, ws_idx);
     ewmh_update_client_list(wm);
@@ -333,19 +371,22 @@ client_refresh_name(wm_t *wm, client_t *c)
 }
 
 /* §5.7: rounded bounding box via XShape, approximated with one
- * rectangle per corner scanline. radius 0 clears the shape. Period-
- * correct hard-edged rounding: no anti-aliasing, ever. */
+ * rectangle per corner scanline. radius 0 clears the shape — an empty
+ * region rather than the interior rect matters because the XShape
+ * bounding region clips the window border; a covering rect here would
+ * silently erase the server-drawn border (only visible on floats,
+ * which are never shaped). Period-correct hard-edged rounding: no
+ * anti-aliasing, ever. */
 void
-client_shape(wm_t *wm, client_t *c, unsigned radius)
+shape_window(wm_t *wm, xcb_window_t win, unsigned w, unsigned h,
+             unsigned radius)
 {
     if (radius == 0) {
         xcb_shape_rectangles(wm->conn, XCB_SHAPE_SO_SET,
-            XCB_SHAPE_SK_BOUNDING, XCB_CLIP_ORDERING_UNSORTED, c->win,
+            XCB_SHAPE_SK_BOUNDING, XCB_CLIP_ORDERING_UNSORTED, win,
             0, 0, 0, NULL);
         return;
     }
-    unsigned w = c->w, h = c->h;
-
     if (w < radius * 2 || h < radius * 2)
         radius = (w < h ? w : h) / 2;
     if (radius == 0)
@@ -377,8 +418,14 @@ client_shape(wm_t *wm, client_t *c, unsigned radius)
                 (uint16_t)(w - 2 * (radius - dx)), 1 };
     }
     xcb_shape_rectangles(wm->conn, XCB_SHAPE_SO_SET,
-        XCB_SHAPE_SK_BOUNDING, XCB_CLIP_ORDERING_UNSORTED, c->win, 0,
+        XCB_SHAPE_SK_BOUNDING, XCB_CLIP_ORDERING_UNSORTED, win, 0,
         0, (uint16_t)n, rects);
+}
+
+void
+client_shape(wm_t *wm, client_t *c, unsigned radius)
+{
+    shape_window(wm, c->win, (unsigned)c->w, (unsigned)c->h, radius);
 }
 
 void
@@ -409,26 +456,33 @@ apply_geom(wm_t *wm, client_t *c, int x, int y, unsigned w, unsigned h)
         y = home->geom.y;
         w = home->geom.w;
         h = home->geom.h;
-        xcb_configure_window(wm->conn, c->win,
-            XCB_CONFIG_WINDOW_BORDER_WIDTH, (uint32_t[]){ 0 });
-        client_shape(wm, c, 0);
-    } else if (cfg.corner_radius > 0) {
-        xcb_configure_window(wm->conn, c->win,
-            XCB_CONFIG_WINDOW_BORDER_WIDTH,
-            (uint32_t[]){ cfg.border_width });
+    } else if (cfg.corner_radius > 0 && !c->deco) {
         client_shape(wm, c, cfg.corner_radius);
     }
-
-    uint32_t vals[4] = { (uint32_t)x, (uint32_t)y, w, h };
-
     c->x = x;
     c->y = y;
     c->w = w;
     c->h = h;
-    xcb_configure_window(wm->conn, c->win,
-        XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH |
-            XCB_CONFIG_WINDOW_HEIGHT,
-        vals);
+
+    uint32_t vals[4] = { (uint32_t)x, (uint32_t)y, w, h };
+
+    if (c->deco) {
+        /* The client lives at (0,title_h) inside the wrapper; deco_update
+         * positions wrapper and child from the client-area rect, and
+         * stretches both over the whole output for fullscreen. */
+        deco_update(wm, c);
+        if (c->fullscreen && home)
+            xcb_configure_window(wm->conn, c->win,
+                XCB_CONFIG_WINDOW_BORDER_WIDTH, (uint32_t[]){ 0 });
+    } else {
+        if (c->fullscreen && home)
+            xcb_configure_window(wm->conn, c->win,
+                XCB_CONFIG_WINDOW_BORDER_WIDTH, (uint32_t[]){ 0 });
+        xcb_configure_window(wm->conn, c->win,
+            XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
+                XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+            vals);
+    }
     xcb_send_event(wm->conn, 0, c->win, XCB_EVENT_MASK_STRUCTURE_NOTIFY,
         (const char *)&(xcb_configure_notify_event_t){
             .response_type = XCB_CONFIGURE_NOTIFY,
@@ -438,7 +492,7 @@ apply_geom(wm_t *wm, client_t *c, int x, int y, unsigned w, unsigned h)
             .y = (int16_t)y,
             .width = (uint16_t)w,
             .height = (uint16_t)h,
-            .border_width = (uint16_t)cfg.border_width,
+            .border_width = (uint16_t)(c->deco ? 0 : cfg.border_width),
         });
 }
 
@@ -453,6 +507,38 @@ client_poll_urgency(wm_t *wm, client_t *c)
         client_set_urgent(wm, c, true);
 }
 
+/* Return the top-level window for a client: the deco wrapper if present,
+ * else the client window itself. This is the window that actually controls
+ * top-level stacking. */
+static xcb_window_t
+client_top_win(client_t *c)
+{
+    return c->deco ? c->deco->win : c->win;
+}
+
+/* ICCCM §4.2.3: a transient must stay stacked above its parent, so
+ * raising a client re-raises any of its transients (and theirs, so a
+ * dialog chain stays on top). Depth-bounded against transient cycles. */
+static void
+raise_client_depth(wm_t *wm, client_t *c, unsigned depth)
+{
+    raise_window(wm, client_top_win(c));
+    if (depth >= 8)
+        return;
+    for (client_t *t = wm->clients; t; t = t->next)
+        if (t->transient_for == c->win && !t->scratch_hidden &&
+            workspaces[t->ws].mon &&
+            workspaces[t->ws].mon->ws_visible == t->ws)
+            raise_client_depth(wm, t, depth + 1);
+}
+
+void
+raise_client(wm_t *wm, client_t *c)
+{
+    if (c)
+        raise_client_depth(wm, c, 0);
+}
+
 void
 focus(wm_t *wm, client_t *c)
 {
@@ -462,16 +548,34 @@ focus(wm_t *wm, client_t *c)
         c = NULL;
     if (c && wm->focused == c)
         return;
-    if (wm->focused)
+    if (c && c != wm->mru) {
+        /* MRU promotion: the focused client leads the switcher list */
+        if (c->mru_prev)
+            c->mru_prev->mru_next = c->mru_next;
+        if (c->mru_next)
+            c->mru_next->mru_prev = c->mru_prev;
+        c->mru_next = wm->mru;
+        c->mru_prev = NULL;
+        if (wm->mru)
+            wm->mru->mru_prev = c;
+        wm->mru = c;
+    }
+    if (wm->focused) {
         set_border(wm, wm->focused, UNFOCUS_COLOR);
+        if (wm->focused->deco)
+            deco_draw(wm, wm->focused);
+    }
     wm->focused = c;
     if (c) {
         if (workspaces[c->ws].mon)
             wm->focus_mon = workspaces[c->ws].mon;
         set_border(wm, c,
             c->urgent ? URGENT_COLOR : FOCUS_COLOR);
+        if (c->deco)
+            deco_draw(wm, c);
         xcb_set_input_focus(wm->conn, XCB_INPUT_FOCUS_POINTER_ROOT, c->win,
             XCB_CURRENT_TIME);
+        raise_client(wm, c);
         workspaces[c->ws].sel = c;
         if (c->urgent)
             client_set_urgent(wm, c, false);
@@ -484,6 +588,8 @@ focus(wm_t *wm, client_t *c)
     uint32_t active = c ? c->win : XCB_NONE;
     xcb_change_property(wm->conn, XCB_PROP_MODE_REPLACE, wm->scr->root,
         a->net_active_window, XCB_ATOM_WINDOW, 32, 1, &active);
+    if (menu_active())
+        menu_bump(wm);
 }
 
 void
@@ -496,7 +602,7 @@ void
 refocus_ws(wm_t *wm, unsigned idx)
 {
     for (client_t *c = wm->clients; c; c = c->next) {
-        if (c->ws == idx && !c->scratch_hidden) {
+        if (c->ws == idx && !c->scratch_hidden && !c->minimized) {
             focus(wm, c);
             return;
         }

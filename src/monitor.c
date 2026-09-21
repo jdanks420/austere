@@ -8,6 +8,7 @@
 #include "bar.h"
 #include "client.h"
 #include "monitor.h"
+#include "popup.h"
 #include "util.h"
 #include "workspace.h"
 
@@ -237,6 +238,7 @@ monitors_apply(wm_t *wm, const Rect *rects, unsigned n)
         oldh = m;
     }
     bars_sync(wm);
+    popups_sync(wm);
 }
 
 monitor_t *

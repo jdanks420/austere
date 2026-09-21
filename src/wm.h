@@ -9,6 +9,7 @@
 
 #include "atoms.h"
 #include "monitor.h"
+#include "mouse.h"
 
 struct client;
 typedef struct client client_t;
@@ -16,8 +17,6 @@ struct wm;
 typedef struct wm wm_t;
 struct font;
 typedef struct font font_t;
-
-#include "mouse.h"
 
 typedef struct wm {
     const char *self;
@@ -37,12 +36,21 @@ typedef struct wm {
     monitor_t *focus_mon; /* last monitor with input focus */
     int randr_event_base; /* -1 when the extension is absent */
     client_t *clients; /* newest first */
+    client_t *mru;     /* most-recently-focused first (switcher) */
     client_t *focused;
     unsigned nclients;
     mouse_t mouse;
-    font_t *fonts; /* core-font cache owned by draw.c */
+    font_t *fonts; /* fontconfig-pattern cache owned by draw.c */
+    void *ftlib; /* FT_Library handle, owned by draw.c */
+    uint32_t *textbuf; /* scratch ARGB line buffer, owned by draw.c */
+    unsigned textbuf_cap;
+    unsigned layout_idx; /* active layout for ALL workspaces (SPEC §4.2) */
+    bool deco_argb; /* compositor present + 32-bit visual usable */
+    uint8_t deco_argb_depth;
+    xcb_visualid_t deco_argb_visual;
 } wm_t;
 
 int wm_main(int argc, char **argv);
+void wm_restart(wm_t *wm);
 
 #endif

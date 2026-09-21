@@ -6,9 +6,11 @@
  * (SPEC §6.2); the regs themselves live in bar_modules/<name>.c. */
 extern const mod_reg_t wsmod, layoutmod, titlemod;
 extern const mod_reg_t clockmod, batmod, volmod;
+extern const mod_reg_t cpumod, rammod;
 
 const mod_reg_t *const bar_module_reg[] = {
-    &wsmod, &layoutmod, &titlemod, &clockmod, &batmod, &volmod, NULL
+    &wsmod, &layoutmod, &titlemod, &clockmod, &batmod, &volmod,
+    &cpumod, &rammod, NULL
 };
 
 const mod_reg_t *

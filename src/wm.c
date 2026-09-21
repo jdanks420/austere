@@ -15,6 +15,7 @@
 
 #include "atoms.h"
 #include "client.h"
+#include "deco.h"
 #include "event.h"
 #include "layout.h"
 #include "bar.h"
@@ -26,7 +27,6 @@
 #include "socket.h"
 #include "state.h"
 #include "welcome.h"
-#include "hotwatch.h"
 #include "keys.h"
 #include "conf.h"
 #include "workspace.h"
@@ -45,7 +45,8 @@ on_signal(int sig)
     char b = sig == SIGHUP ? 'r' : 'w';
 
     if (sig != SIGHUP) {
-        fprintf(stderr, "austere: signal %d quitting\n", sig);
+        const char msg[] = "austere: signal received, quitting\n";
+        (void)write(STDERR_FILENO, msg, sizeof(msg) - 1);
         g_wm->running = 0;
     }
     ssize_t r;
@@ -331,13 +332,13 @@ wm_main(int argc, char **argv)
         set_layout(&wm, env_layout);
     else
         set_layout(&wm, cfg.default_layout);
-    hotwatch_init(conf_path());
     socket_init(&wm);
     grab_keys(&wm);
     bar_init(&wm);
     popups_init(&wm);
     bars_sync(&wm);
 
+    deco_init(&wm);
     scan_existing(&wm);
     state_replay(&wm);
 

@@ -82,10 +82,10 @@ socket_init(wm_t *wm)
     return fd;
 }
 
-/* Dispatch one command line; write the reply. Returns false on a
- * malformed request that still deserves an "err" reply — never a
- * reason to drop the connection mid-line (§10 socket-safety). */
-static void
+/* Dispatch one command line; write the reply. Returns false when the
+ * handler closed the connection itself (restart teardown), so the
+ * caller must stop reading and skip its own close. */
+static bool
 serve_line(wm_t *wm, int fd, char *line)
 {
     char reply[256] = "ok";
@@ -94,7 +94,7 @@ serve_line(wm_t *wm, int fd, char *line)
         line++;
     if (!*line) {
         dprintf(fd, "err empty\n");
-        return;
+        return true;
     }
     char *sp = strchr(line, ' ');
     const char *arg = "";
@@ -107,25 +107,16 @@ serve_line(wm_t *wm, int fd, char *line)
 
     if (id == 255) {
         /* socket-only verbs */
-        if (!strcmp(line, "exec")) {
-            if (!*arg) {
-                dprintf(fd, "err exec needs a command\n");
-                return;
-            }
-            spawn_shell(arg);
-            dprintf(fd, "ok\n");
-            return;
-        }
         if (!strcmp(line, "state") && !strcmp(arg, "dump")) {
             dprintf(fd,
                 "ok clients=%u ws=%u\n", wm->nclients,
                 focused_mon(wm) ? focused_mon(wm)->ws_visible : 0);
-            return;
+            return true;
         }
         snprintf(reply, sizeof(reply), "err unknown action '%s'",
             line);
         dprintf(fd, "%s\n", reply);
-        return;
+        return true;
     }
     if (id == ACT_RESTART) {
         /* reply first, then tear the socket down before exec — the
@@ -135,30 +126,39 @@ serve_line(wm_t *wm, int fd, char *line)
         close(fd);
         socket_shutdown(wm);
         run_action(wm, id);
-        return;
+        return false;
     }
     if (id == ACT_SET_LAYOUT) {
         if (!*arg) {
             dprintf(fd, "err set_layout needs a name\n");
-            return;
+            return true;
         }
         if (!layout_by_name(arg)) {
             dprintf(fd, "err unknown layout '%s'\n", arg);
-            return;
+            return true;
         }
         set_layout(wm, arg);
         dprintf(fd, "ok\n");
-        return;
+        return true;
     }
     if (id == ACT_LOAD_STATE) {
         if (!*arg) {
             dprintf(fd, "err load_state needs a name\n");
-            return;
+            return true;
         }
         states_load(wm, arg)
             ? dprintf(fd, "ok\n")
             : dprintf(fd, "err no such state\n");
-        return;
+        return true;
+    }
+    if (id == ACT_EXEC) {
+        if (!*arg) {
+            dprintf(fd, "err exec needs a command\n");
+            return true;
+        }
+        spawn_shell(arg);
+        dprintf(fd, "ok\n");
+        return true;
     }
     if (id == ACT_VIEW_WS || id == ACT_SEND_WS) {
         char *end;
@@ -166,17 +166,18 @@ serve_line(wm_t *wm, int fd, char *line)
 
         if (*arg < '0' || *end || v < 0 || v >= WS_MAX) {
             dprintf(fd, "err %s needs index 0..%u\n", line, WS_MAX - 1);
-            return;
+            return true;
         }
         if (id == ACT_VIEW_WS)
             view_ws(wm, (unsigned)v);
         else
             send_focused_to_ws(wm, (unsigned)v);
         dprintf(fd, "ok\n");
-        return;
+        return true;
     }
     run_action(wm, id);
     dprintf(fd, "ok\n");
+    return true;
 }
 
 void
@@ -194,8 +195,9 @@ socket_handle(wm_t *wm)
         char buf[1024];
         size_t fill = 0;
         ssize_t r;
+        bool dead = false;
 
-        while ((r = read(fd, buf + fill, sizeof(buf) - fill)) > 0) {
+        while (!dead && (r = read(fd, buf + fill, sizeof(buf) - fill)) > 0) {
             fill += (size_t)r;
             char *start = buf;
 
@@ -206,16 +208,21 @@ socket_handle(wm_t *wm)
                 if (!nl)
                     break;
                 *nl = '\0';
-                serve_line(wm, fd, start);
+                dead = !serve_line(wm, fd, start);
                 start = nl + 1;
+                if (dead)
+                    break;
             }
             memmove(buf, start, (size_t)(buf + fill - start));
             fill = (size_t)(buf + fill - start);
             if (fill == sizeof(buf))
                 break; /* garbage flood: drop the rest (§10) */
         }
-        if (fill)
-            serve_line(wm, fd, buf);
-        close(fd);
+        if (!dead && fill && fill < sizeof(buf) && *buf) {
+            buf[fill] = '\0';
+            dead = !serve_line(wm, fd, buf);
+        }
+        if (!dead)
+            close(fd);
     }
 }

@@ -72,7 +72,7 @@ popup_ensure_window(wm_t *wm)
         (int16_t)(a.y + POPUP_PAD), POPUP_W, h, 1,
         XCB_WINDOW_CLASS_INPUT_OUTPUT, XCB_COPY_FROM_PARENT,
         XCB_CW_OVERRIDE_REDIRECT | XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK,
-        (uint32_t[]){ 0x202020, 1, 0 });
+        (uint32_t[]){ cfg.bar_bg, 1, 0 });
     draw_setup(wm, &draw, win);
     mapped = false;
 }
@@ -84,10 +84,10 @@ popup_draw(wm_t *wm)
     font_t *f = draw_ui_font(wm);
     unsigned h = font_height(f) + 2 * POPUP_PAD;
 
-    draw_rect(wm, &draw, 0, 0, POPUP_W, h, 0x202020);
+    draw_rect(wm, &draw, 0, 0, POPUP_W, h, cfg.bar_bg);
     draw_text(wm, &draw, f, POPUP_PAD,
         (int)(POPUP_PAD + font_ascent(f)), s, (unsigned)strlen(s),
-        0xdddddd, 0x202020);
+        cfg.bar_fg, cfg.bar_bg);
 }
 
 void
@@ -115,11 +115,7 @@ popup_notify(wm_t *wm, const char *fmt, ...)
     /* Draw after map: the server clears the window on map and would
      * wipe anything painted first. */
     popup_draw(wm);
-    /* Raise above everything, including bars. */
-    uint32_t vals = XCB_STACK_MODE_ABOVE;
-
-    xcb_configure_window(wm->conn, win, XCB_CONFIG_WINDOW_STACK_MODE,
-        &vals);
+    raise_window(wm, win);
 }
 
 int
@@ -155,7 +151,10 @@ popups_tick(wm_t *wm)
 void
 popups_shutdown(wm_t *wm)
 {
-    if (win != XCB_NONE)
+    if (win != XCB_NONE) {
+        xcb_free_gc(wm->conn, draw.gc);
         xcb_destroy_window(wm->conn, win);
+    }
     win = XCB_NONE;
+    mapped = false;
 }

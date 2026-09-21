@@ -4,12 +4,14 @@
 #include <string.h>
 
 #include "client.h"
+#include "deco.h"
 #include "ewmh.h"
 #include "layout.h"
 #include <xcb/xcb_icccm.h>
 #include "monitor.h"
 #include "settings.h"
 #include "util.h"
+
 #include "workspace.h"
 
 workspace_t workspaces[WS_MAX];
@@ -25,10 +27,8 @@ workspaces_init(wm_t *wm)
             xstrdup(cfg.ws_names[i] && *cfg.ws_names[i]
                     ? cfg.ws_names[i]
                     : (char[]){ (char)('1' + i), '\0' });
-        workspaces[i].layout_idx = 0;
         workspaces[i].split_ratio = cfg.split_ratio;
         workspaces[i].nmaster = cfg.nmaster;
-        workspaces[i].scroll_off = 0;
     }
 }
 
@@ -56,6 +56,29 @@ client_park(wm_t *wm, client_t *c, bool hide)
         m = focused_mon(wm);
     if (!m)
         return;
+    deco_t *d = c->deco;
+
+    if (d) {
+        /* The wrapper owns the screen geometry; parking the reparented
+         * child instead would clip it inside the unmoved frame, leaving
+         * a blank bar_bg box on screen (SPEC §4.4: the wrapper is the
+         * positioning surface). */
+        if (hide) {
+            uint32_t vals[2] = {
+                (uint32_t)m->geom.x + m->geom.w + 64,
+                (uint32_t)m->geom.y + m->geom.h + 64,
+            };
+
+            xcb_configure_window(wm->conn, d->win,
+                XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, vals);
+            return;
+        }
+        uint32_t vals[2] = { (uint32_t)d->win_x, (uint32_t)d->win_y };
+
+        xcb_configure_window(wm->conn, d->win,
+            XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, vals);
+        return;
+    }
     int px = c->x, py = c->y;
 
     if (hide) {
@@ -97,6 +120,9 @@ view_ws(wm_t *wm, unsigned idx)
     if (idx >= WS_MAX)
         return;
     monitor_t *m = workspaces[idx].mon;
+
+    if (!m)
+        return;
     /* Viewing a workspace homed on another monitor moves focus there
      * (SPEC §4.2 focus-follows-switching). */
     if (idx == m->ws_visible) {
@@ -152,8 +178,12 @@ send_client_to_ws(wm_t *wm, client_t *c, unsigned idx)
     if (focused_here) {
         if (to_visible && !c->scratch_hidden)
             focus(wm, c);
-        else
-            refocus_ws(wm, workspaces[old].mon->ws_visible);
+        else {
+            monitor_t *om = workspaces[old].mon;
+
+            if (om)
+                refocus_ws(wm, om->ws_visible);
+        }
     }
 }
 
@@ -180,6 +210,11 @@ ws_migrate_focused_to_next(wm_t *wm)
     m->ws_prev = a;
     t->ws_visible = a;
     t->ws_prev = b;
+    /* Re-home: ws_shown() reads workspaces[].mon->ws_visible, so the
+     * ownership bookkeeping must follow the swap or both workspaces
+     * report "not shown" and the bar/switcher deselect them. */
+    workspaces[a].mon = t;
+    workspaces[b].mon = m;
     set_ws_members_mapped(wm, a, false);
     set_ws_members_mapped(wm, b, false);
     set_ws_members_mapped(wm, b, true);
@@ -197,4 +232,90 @@ void
 send_focused_to_ws(wm_t *wm, unsigned idx)
 {
     send_client_to_ws(wm, wm->focused, idx);
+}
+
+/* Directional focus: among visible clients strictly in the requested
+ * direction from the focused window's center, prefer the one whose
+ * center aligns on the perpendicular axis, then the closest forward.
+ * No wrap: if nothing lies that way, focus stays put. */
+void
+focus_direction(wm_t *wm, unsigned dir)
+{
+    monitor_t *m = focused_mon(wm);
+
+    if (!m)
+        return;
+    unsigned vis = m->ws_visible;
+    client_t *f = wm->focused;
+    int fcx, fcy;
+
+    if (f && f->ws == vis && !f->scratch_hidden) {
+        fcx = f->x + (int)f->w / 2;
+        fcy = f->y + (int)f->h / 2;
+    } else {
+        /* no visible focused window (e.g. empty view): search outward
+         * from the visible area center */
+        fcx = m->geom.x + (int)m->geom.w / 2;
+        fcy = m->geom.y + (int)m->geom.h / 2;
+    }
+
+    client_t *best = NULL;
+    int best_over = 0, best_off = 0;
+
+    for (client_t *c = wm->clients; c; c = c->next) {
+        if (c == f || c->ws != vis || c->scratch_hidden)
+            continue;
+        int ccx = c->x + (int)c->w / 2;
+        int ccy = c->y + (int)c->h / 2;
+        int off, over, aover;
+        bool ok = false;
+
+        switch (dir) {
+        case FOCUS_LEFT:
+            off = fcx - ccx;
+            over = ccy - fcy;
+            ok = ccx < fcx;
+            break;
+        case FOCUS_RIGHT:
+            off = ccx - fcx;
+            over = ccy - fcy;
+            ok = ccx > fcx;
+            break;
+        case FOCUS_UP:
+            off = fcy - ccy;
+            over = ccx - fcx;
+            ok = ccy < fcy;
+            break;
+        case FOCUS_DOWN:
+            off = ccy - fcy;
+            over = ccx - fcx;
+            ok = ccy > fcy;
+            break;
+        }
+        if (!ok)
+            continue;
+        aover = over < 0 ? -over : over;
+        off = off < 0 ? -off : off;
+
+        if (!best || aover < best_over ||
+            (aover == best_over && off < best_off)) {
+            best = c;
+            best_over = aover;
+            best_off = off;
+        }
+    }
+    if (best)
+        focus(wm, best);
+}
+
+/* Count managed, non-floating, non-scratchpad clients on a workspace. */
+unsigned
+ws_count_clients(wm_t *wm, unsigned idx)
+{
+    unsigned n = 0;
+    for (client_t *c = wm->clients; c; c = c->next)
+        if (c->ws == idx && !c->floating && !c->scratchpad &&
+            !c->swallowed_by && !c->minimized)
+            n++;
+    return n;
 }

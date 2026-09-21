@@ -16,34 +16,42 @@ tile_arrange(wm_t *wm, monitor_t *mon, workspace_t *ws)
     int mw;
 
     for (client_t *c = wm->clients; c; c = c->next)
-        if (c->ws == idx && !c->floating && !c->scratchpad && !c->swallowed_by)
+        if (c->ws == idx && !c->floating && !c->scratchpad &&
+            !c->swallowed_by && !c->minimized)
             n++;
     if (n == 0)
         return;
 
     unsigned gap = cfg.gap;
+    unsigned title_h = cfg.deco ? cfg.deco_title_h : 0;
 
     if (cfg.smart_gaps && n == 1)
         gap = 0;
     int aw = (int)area.w - 2 * (int)gap;
-    int ah = (int)area.h - 2 * (int)gap;
+    int ah = (int)area.h - 2 * (int)gap - (int)title_h;
     int ax = area.x + (int)gap;
-    int ay = area.y + (int)gap;
+    int ay = area.y + (int)gap + (int)title_h;
 
     nm = ws->nmaster < n ? ws->nmaster : n;
     mw = (int)((double)aw * ws->split_ratio);
 
     unsigned mcol = nm < n ? nm : n;
     unsigned scol = n - mcol;
-    int mh = ah - (int)((mcol - 1) * gap);
-    int sh = ah - (int)((scol - 1) * gap);
+    int mh = mcol > 0 ? ah - (int)((mcol - 1) * (gap + title_h)) : ah;
+    int sh = scol > 0 ? ah - (int)((scol - 1) * (gap + title_h)) : ah;
+
+    if (mh < 1)
+        mh = 1;
+    if (sh < 1)
+        sh = 1;
 
     int my = ay;     /* running y in master column */
     int sy = ay;     /* running y in stack column */
     unsigned sp = 0; /* placements made in stack column */
 
     for (client_t *c = wm->clients; c; c = c->next) {
-        if (c->ws != idx || c->floating || c->scratchpad || c->swallowed_by)
+        if (c->ws != idx || c->floating || c->scratchpad ||
+            c->swallowed_by || c->minimized)
             continue;
 
         if (i < nm) {
@@ -51,13 +59,13 @@ tile_arrange(wm_t *wm, monitor_t *mon, workspace_t *ws)
             int h = (mp + 1 == mcol) ? ah - my + ay : mh / (int)mcol;
             int w = (mcol == n) ? aw : mw;
             apply_geom(wm, c, ax, my, (unsigned)w, (unsigned)h);
-            my += h + (int)gap;
+            my += h + (int)gap + (int)title_h;
         } else {
             int h = (sp + 1 == scol) ? ah - sy + ay : sh / (int)scol;
             apply_geom(wm, c, ax + mw + (nm < n ? (int)gap : 0), sy,
                 (unsigned)(aw - mw - (nm < n ? (int)gap : 0)),
                 (unsigned)h);
-            sy += h + (int)gap;
+            sy += h + (int)gap + (int)title_h;
             sp++;
         }
         i++;

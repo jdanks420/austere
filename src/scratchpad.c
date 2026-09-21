@@ -8,6 +8,7 @@
 #include "layout.h"
 #include "monitor.h"
 #include "scratchpad.h"
+#include "util.h"
 #include "workspace.h"
 
 void
@@ -51,6 +52,9 @@ static void
 show_scratch(wm_t *wm, client_t *c)
 {
     monitor_t *m = focused_mon(wm);
+
+    if (!m)
+        return;
     unsigned w = c->w ? c->w : 640;
     unsigned h = c->h ? c->h : 480;
 
@@ -63,9 +67,7 @@ show_scratch(wm_t *wm, client_t *c)
     apply_geom(wm, c, c->x, c->y, w, h);
     c->scratch_hidden = false;
     xcb_map_window(wm->conn, c->win);
-    xcb_configure_window(wm->conn, c->win,
-        XCB_CONFIG_WINDOW_STACK_MODE,
-        (uint32_t[]){ XCB_STACK_MODE_ABOVE });
+    raise_client(wm, c);
     focus(wm, c);
 }
 
@@ -74,8 +76,12 @@ hide_scratch(wm_t *wm, client_t *c)
 {
     c->scratch_hidden = true;
     client_park(wm, c, true);
-    if (wm->focused == c)
-        refocus_ws(wm, workspaces[c->ws].mon->ws_visible);
+    if (wm->focused == c) {
+        monitor_t *m = workspaces[c->ws].mon;
+
+        if (m)
+            refocus_ws(wm, m->ws_visible);
+    }
 }
 
 void

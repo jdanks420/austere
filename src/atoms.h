@@ -28,7 +28,8 @@ struct atoms {
     xcb_atom_t net_workarea;
     xcb_atom_t net_wm_window_type;
     xcb_atom_t net_wm_window_type_dock;
-    xcb_atom_t austere_test_monitors;
+    xcb_atom_t net_wm_window_type_dialog;
+    xcb_atom_t net_wm_window_type_toolbar;
 };
 
 typedef struct atoms atoms_t;

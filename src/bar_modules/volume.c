@@ -6,7 +6,6 @@
 
 #include "../bar.h"
 #include "../barmod.h"
-#include "../draw.h"
 
 /* Shells out to pactl, falling back to amixer (§6.2) — deliberately
  * impure: no uniform mixer ABI exists without libasound, which we
@@ -64,42 +63,17 @@ vol_read(char *out, size_t outsz)
     }
 }
 
-unsigned
+static unsigned
 volmod_render(wm_t *wm, monitor_t *mon, module_t *m, int x, bool draw)
 {
     static time_t last;
     static char text[16];
-    font_t *f = bar_font(wm, m);
 
     if (time(NULL) - last >= VOL_INTERVAL) {
         last = time(NULL);
         vol_read(text, sizeof(text));
     }
-    size_t len = strlen(text);
-
-    if (!len || !draw)
-        return len ? draw_text_w(wm, f, text, (unsigned)len) +
-                           2 * BAR_PAD
-                   : 0;
-    unsigned w = draw_text_w(wm, f, text, (unsigned)len) + 2 * BAR_PAD;
-
-    draw_text(wm, &mon->bar->draw, f, x + BAR_PAD,
-        bar_baseline(wm, mon, f), text, (unsigned)len,
-        bar_color(m, BAR_FG), BAR_BG);
-    return w;
+    return textmod_render(wm, mon, m, x, draw, text, strlen(text));
 }
 
-void
-volmod_click(wm_t *wm, monitor_t *mon, module_t *m, int mod_x, int px,
-    unsigned btn)
-{
-    (void)wm;
-    (void)mon;
-    (void)m;
-    (void)mod_x;
-    (void)px;
-    (void)btn;
-}
-
-const mod_reg_t volmod = { "volume", volmod_render,
-    volmod_click };
+const mod_reg_t volmod = { "volume", volmod_render, mod_noop_click };

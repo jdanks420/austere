@@ -11,10 +11,10 @@
 #include "util.h"
 #include "workspace.h"
 
-/* §7.2: two switcher modes. MRU quick-cycle walks the client list
- * (newest-focused first) within the focused monitor's visible
- * workspace; the panel lists every managed client and focuses the
- * picked one, switching workspace and monitor as needed. */
+/* §7.2: two switcher modes. MRU quick-cycle walks client MRU order
+ * (most-recently-focused first) within the focused monitor's visible
+ * workspace; the panel lists every managed client in MRU order and
+ * focuses the picked one, switching workspace and monitor as needed. */
 
 void
 mru_step(wm_t *wm)
@@ -25,23 +25,18 @@ mru_step(wm_t *wm)
         return;
     unsigned vis = m->ws_visible;
     client_t *start = wm->focused;
-    client_t *c = start ? start->next : wm->clients;
+    client_t *c = start ? start->mru_next : wm->mru;
 
-    for (;;) {
-        if (!c) {
-            if (!start)
-                break;
-            c = wm->clients; /* wrap: list is MRU-ordered */
-            if (c == start)
-                break;
-        }
-        if (c == start)
+    for (unsigned k = 0; k < wm->nclients; k++) {
+        if (!c)
+            c = wm->mru; /* wrap past the tail */
+        if (!c)
             break;
-        if (c->ws == vis && !c->scratch_hidden) {
+        if (c != start && c->ws == vis && !c->scratch_hidden) {
             focus(wm, c);
             return;
         }
-        c = c->next;
+        c = c->mru_next;
     }
 }
 
@@ -53,36 +48,20 @@ typedef struct {
 
 static switcher_ctx_t sctx;
 
-/* WM_CLASS instance.class read live for the label (validated read). */
+/* WM_CLASS instance.class read for the label (validated read). */
 static char *
 win_class(wm_t *wm, xcb_window_t win)
 {
-    size_t len = 0;
-    char *raw = (char *)get_property(wm, win, XCB_ATOM_WM_CLASS,
-        XCB_ATOM_STRING, 8, &len);
+    char *cls = wm_class(wm, win);
 
-    if (!raw)
-        return NULL;
-    /* format: instance NUL class NUL */
-    char *cls = raw;
-
-    while (*cls && (size_t)(cls - raw) < len)
-        cls++;
-    if ((size_t)(cls - raw) + 1 < len) {
-        cls++;
-        char *out = xstrdup(cls);
-
-        free(raw);
-        return out;
-    }
-    free(raw);
-    return xstrdup("?");
+    return cls ? cls : xstrdup("?");
 }
 
-static bool
-switcher_enter(wm_t *wm, const char *input, const char *row)
+static void
+switcher_switch_to(wm_t *wm, const char *row)
 {
-    (void)input;
+    if (!row)
+        return;
     for (unsigned i = 0; i < sctx.n; i++) {
         if (strcmp(sctx.labels[i], row) != 0)
             continue;
@@ -93,9 +72,21 @@ switcher_enter(wm_t *wm, const char *input, const char *row)
         if (!ws_shown(c->ws))
             view_ws(wm, c->ws);
         focus(wm, c);
-        scroll_center_client(wm, c); /* scroll layout: center the pick */
         break;
     }
+}
+
+static void
+switcher_preview(wm_t *wm, const char *row)
+{
+    switcher_switch_to(wm, row);
+}
+
+static bool
+switcher_enter(wm_t *wm, const char *input, const char *row)
+{
+    (void)input;
+    switcher_switch_to(wm, row);
     return false;
 }
 
@@ -120,7 +111,7 @@ switcher_panel_open(wm_t *wm)
     sctx.wins = NULL;
     sctx.labels = NULL;
     sctx.n = 0;
-    for (client_t *c = wm->clients; c; c = c->next) {
+    for (client_t *c = wm->mru; c; c = c->mru_next) {
         if (c->scratch_hidden)
             continue;
         if (cfg.switcher_monitor_scope) {
@@ -161,7 +152,10 @@ switcher_panel_open(wm_t *wm)
         .nrows = sctx.n,
         .filter = true,
         .tab_complete = false,
+        .hold_alt = true,
+        .init_sel = 1, /* open already pointed at the next MRU window */
         .on_enter = switcher_enter,
+        .on_preview = switcher_preview,
         .on_close = switcher_close,
     };
 

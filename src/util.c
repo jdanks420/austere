@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <xcb/xcb.h>
 
+#include "client.h"
 #include "util.h"
 
 void *
@@ -86,6 +87,65 @@ has_proto(wm_t *wm, xcb_window_t win, xcb_atom_t proto)
     return found;
 }
 
+/* ICCCM §4.1.2.5: WM_CLASS is "instance\0class\0". Returns the class
+ * string, or the instance when the class field is absent. Caller frees;
+ * NULL when the property is missing or degenerate. */
+char *
+wm_class(wm_t *wm, xcb_window_t win)
+{
+    size_t len = 0;
+    char *raw = (char *)get_property(wm, win, XCB_ATOM_WM_CLASS,
+        XCB_ATOM_STRING, 8, &len);
+
+    if (!raw || len < 2) {
+        free(raw);
+        return NULL;
+    }
+    size_t in = 0;
+
+    while (in < len && raw[in])
+        in++;
+    const char *cls = raw;
+
+    if (in + 1 < len)
+        cls = raw + in + 1;
+    char *out = xstrdup(cls);
+
+    free(raw);
+    return out;
+}
+
+void
+raise_window(wm_t *wm, xcb_window_t win)
+{
+    uint32_t above = XCB_STACK_MODE_ABOVE;
+
+    xcb_configure_window(wm->conn, win, XCB_CONFIG_WINDOW_STACK_MODE,
+        &above);
+}
+
+/* ICCCM §4.2.4: polite close via WM_DELETE; brutal kill for windows
+ * that refuse the protocol. */
+void
+client_close(wm_t *wm, client_t *c)
+{
+    atoms_t *a = wm->atoms;
+
+    if (has_proto(wm, c->win, a->wm_delete_window)) {
+        xcb_client_message_event_t ev = { 0 };
+
+        ev.response_type = XCB_CLIENT_MESSAGE;
+        ev.format = 32;
+        ev.window = c->win;
+        ev.type = a->wm_protocols;
+        ev.data.data32[0] = a->wm_delete_window;
+        ev.data.data32[1] = XCB_CURRENT_TIME;
+        xcb_send_event(wm->conn, 0, c->win, 0, (const char *)&ev);
+    } else {
+        xcb_kill_client(wm->conn, c->win);
+    }
+}
+
 void
 spawn_async(char *const argv[])
 {
@@ -125,4 +185,22 @@ mkdir_p(const char *dir)
     if (mkdir(tmp, 0755) < 0 && errno != EEXIST)
         return -1;
     return 0;
+}
+
+/* Ascending bubble-sort of a pointer array; ci selects a
+ * case-insensitive comparison. */
+void
+sort_strs(char **v, unsigned n, bool ci)
+{
+    for (unsigned a = 0; a + 1 < n; a++)
+        for (unsigned b = a + 1; b < n; b++) {
+            int c = ci ? strcasecmp(v[a], v[b]) : strcmp(v[a], v[b]);
+
+            if (c > 0) {
+                char *t = v[a];
+
+                v[a] = v[b];
+                v[b] = t;
+            }
+        }
 }

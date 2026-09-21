@@ -15,10 +15,8 @@ typedef struct workspace {
     char *name;          /* conf-provided or decimal fallback */
     monitor_t *mon;      /* output this workspace lives on */
     client_t *sel;       /* last-focused client, NULL if empty */
-    unsigned layout_idx; /* active layout for THIS workspace */
     double split_ratio;  /* per-ws layout parameters (SPEC §4.2) */
     unsigned nmaster;
-    unsigned scroll_off; /* scroll layout: px panned past left edge */
     bool urgent;
 } workspace_t;
 
@@ -32,5 +30,12 @@ void send_focused_to_ws(wm_t *wm, unsigned idx);
 void send_client_to_ws(wm_t *wm, struct client *c, unsigned idx);
 void ws_migrate_focused_to_next(wm_t *wm);
 void client_park(wm_t *wm, struct client *c, bool hide);
+unsigned ws_count_clients(wm_t *wm, unsigned idx);
+
+#define FOCUS_LEFT 0
+#define FOCUS_RIGHT 1
+#define FOCUS_UP 2
+#define FOCUS_DOWN 3
+void focus_direction(wm_t *wm, unsigned dir);
 
 #endif

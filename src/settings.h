@@ -12,12 +12,21 @@
  * (§9.4); the menu row arrives with M8. */
 
 #define MAX_BINDS 64
+#define BIND_CMD_MAX 192
 
 typedef struct {
     unsigned mods;
     xcb_keysym_t keysym;
     uint8_t action; /* action registry id (event.h) */
     int arg;        /* workspace index for ws actions, else -1 */
+    /* command for ACT_EXEC binds (program/script to launch, run via
+     * /bin/sh -c); inline so no heap ownership bookkeeping in swap */
+    char cmd[BIND_CMD_MAX];
+    /* keycodes resolved once at grab time; the KeyPress path matches
+     * against these so dispatch never allocates or re-scans the
+     * keysyms table */
+    xcb_keycode_t codes[8];
+    uint8_t ncodes;
 } bind_t;
 
 typedef struct {
@@ -34,6 +43,10 @@ typedef struct {
     bool smart_gaps;
     unsigned corner_radius;
     char *font;
+    bool deco;
+    unsigned deco_title_h;
+    uint32_t deco_border;
+    uint32_t deco_unfocus_border;
 
     /* [bar] */
     bool bar_bottom;
@@ -41,6 +54,14 @@ typedef struct {
     uint32_t bar_bg;
     uint32_t bar_fg;
     unsigned bar_gap;
+
+    /* [bar] module placement: three ordered groups; NULL/0 = defaults */
+    char **bar_left;
+    unsigned nbar_left;
+    char **bar_center;
+    unsigned nbar_center;
+    char **bar_right;
+    unsigned nbar_right;
 
     /* [behavior] */
     bool focus_follows_mouse;
@@ -93,13 +114,13 @@ typedef struct {
 } settings_t;
 
 unsigned launcher_module_find(const char *prefix); /* index or UINT_MAX */
-const char *launcher_module_name(unsigned idx);
 
 extern settings_t cfg; /* same single-instance precedent as workspaces[] */
 
 void settings_defaults(settings_t *s);
 void settings_free_strings(settings_t *s);
 void settings_swap(settings_t *dst, settings_t *src);
+void settings_reapply_clients(wm_t *wm);
 
 const char *conf_path(void);
 

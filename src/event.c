@@ -12,6 +12,7 @@
 #include "client.h"
 #include "actions.h"
 #include "conf.h"
+#include "deco.h"
 #include "bar.h"
 #include "keys.h"
 #include "launcher.h"
@@ -25,9 +26,9 @@
 #include "ewmh.h"
 #include "apps.h"
 #include "event.h"
-#include "hotwatch.h"
 #include "popup.h"
 #include "layout.h"
+#include "volume.h"
 #include "monitor.h"
 #include "mouse.h"
 #include "scratchpad.h"
@@ -36,25 +37,6 @@
 
 #include <xcb/xcb_icccm.h>
 
-
-static void
-send_delete(wm_t *wm, client_t *c)
-{
-    atoms_t *a = wm->atoms;
-
-    if (has_proto(wm, c->win, a->wm_delete_window)) {
-        xcb_client_message_event_t ev = { 0 };
-        ev.response_type = XCB_CLIENT_MESSAGE;
-        ev.format = 32;
-        ev.window = c->win;
-        ev.type = a->wm_protocols;
-        ev.data.data32[0] = a->wm_delete_window;
-        ev.data.data32[1] = XCB_CURRENT_TIME;
-        xcb_send_event(wm->conn, 0, c->win, 0, (const char *)&ev);
-    } else {
-        xcb_kill_client(wm->conn, c->win);
-    }
-}
 
 void
 run_action(wm_t *wm, uint8_t action)
@@ -80,7 +62,7 @@ run_action(wm_t *wm, uint8_t action)
     }
     case ACT_CLOSE_FOCUSED:
         if (wm->focused)
-            send_delete(wm, wm->focused);
+            client_close(wm, wm->focused);
         break;
     case ACT_CYCLE_LAYOUT:
         cycle_layout(wm);
@@ -121,18 +103,6 @@ run_action(wm_t *wm, uint8_t action)
         if (!menu_active())
             menu_apps_open(wm);
         break;
-    case ACT_FOCUS_COLUMN_LEFT:
-        scroll_focus_column(wm, -1);
-        break;
-    case ACT_FOCUS_COLUMN_RIGHT:
-        scroll_focus_column(wm, 1);
-        break;
-    case ACT_SCROLL_LEFT:
-        scroll_left(wm);
-        break;
-    case ACT_SCROLL_RIGHT:
-        scroll_right(wm);
-        break;
     case ACT_MENU_STATES:
 
         if (!menu_active())
@@ -151,12 +121,9 @@ run_action(wm_t *wm, uint8_t action)
         if (!menu_active())
             wallpaper_pick(wm);
         break;
-    case ACT_RESTART: {
-        extern void wm_restart(wm_t *wm);
-
+    case ACT_RESTART:
         wm_restart(wm);
         break;
-    }
     case ACT_WS_TO_NEXT_MON:
         ws_migrate_focused_to_next(wm);
         break;
@@ -173,6 +140,50 @@ run_action(wm_t *wm, uint8_t action)
         break;
     case ACT_SCRATCH_MARK:
         scratch_mark(wm);
+        break;
+    case ACT_FULLSCREEN:
+        if (wm->focused) {
+            wm->focused->fullscreen = !wm->focused->fullscreen;
+            ewmh_set_fullscreen(wm, wm->focused,
+                wm->focused->fullscreen);
+            arrange(wm);
+        }
+        break;
+    case ACT_MAXIMIZE:
+        if (wm->focused && wm->focused->deco)
+            deco_toggle_maximize(wm, wm->focused);
+        break;
+    case ACT_RESTORE_MINIMIZED:
+        deco_restore_minimized(wm);
+        break;
+    case ACT_TOGGLE_DECO:
+        cfg.deco = !cfg.deco;
+        deco_reconfigure_all(wm);
+        arrange(wm);
+        break;
+    case ACT_FOCUS_LEFT:
+        focus_direction(wm, FOCUS_LEFT);
+        break;
+    case ACT_FOCUS_RIGHT:
+        focus_direction(wm, FOCUS_RIGHT);
+        break;
+    case ACT_FOCUS_UP:
+        focus_direction(wm, FOCUS_UP);
+        break;
+    case ACT_FOCUS_DOWN:
+        focus_direction(wm, FOCUS_DOWN);
+        break;
+    case ACT_EXEC:
+        /* no command here: dispatch has the bind's cmd */
+        break;
+    case ACT_VOL_RAISE:
+        volume_shift(5);
+        break;
+    case ACT_VOL_LOWER:
+        volume_shift(-5);
+        break;
+    case ACT_VOL_MUTE:
+        volume_toggle_mute();
         break;
     default:
         break;
@@ -193,21 +204,29 @@ handle_key_press(wm_t *wm, xcb_key_press_event_t *ev)
     for (unsigned i = 0; i < cfg.nbinds; i++) {
         if (cfg.binds[i].mods != state)
             continue;
-        xcb_keycode_t *codes = xcb_key_symbols_get_keycode(wm->keysyms,
-            cfg.binds[i].keysym);
+        bool hit = false;
 
-        for (xcb_keycode_t *k = codes; k && *k; k++)
-            if (*k == ev->detail) {
-                free(codes);
-                if (cfg.binds[i].action == ACT_VIEW_WS)
-                    view_ws(wm, (unsigned)cfg.binds[i].arg);
-                else if (cfg.binds[i].action == ACT_SEND_WS)
-                    send_focused_to_ws(wm, (unsigned)cfg.binds[i].arg);
-                else
-                    run_action(wm, cfg.binds[i].action);
-                return;
+        for (unsigned k = 0; k < cfg.binds[i].ncodes; k++)
+            if (cfg.binds[i].codes[k] == ev->detail) {
+                hit = true;
+                break;
             }
-        free(codes);
+        if (!hit)
+            continue;
+        if (cfg.binds[i].action == ACT_VIEW_WS)
+            view_ws(wm, (unsigned)cfg.binds[i].arg);
+        else if (cfg.binds[i].action == ACT_SEND_WS)
+            send_focused_to_ws(wm, (unsigned)cfg.binds[i].arg);
+        else if (cfg.binds[i].action == ACT_EXEC)
+            spawn_shell(cfg.binds[i].cmd);
+        else if (cfg.binds[i].action == ACT_SET_LAYOUT)
+            set_layout(wm, cfg.binds[i].cmd[0] ? cfg.binds[i].cmd
+                                               : cfg.default_layout);
+        else if (cfg.binds[i].action == ACT_LOAD_STATE)
+            states_load(wm, cfg.binds[i].cmd);
+        else
+            run_action(wm, cfg.binds[i].action);
+        return;
     }
 }
 
@@ -241,8 +260,24 @@ handle_unmap_notify(wm_t *wm, xcb_unmap_notify_event_t *ev)
 static void
 handle_destroy_notify(wm_t *wm, xcb_destroy_notify_event_t *ev)
 {
-    if (find_client(wm, ev->window))
+    client_t *c = find_client(wm, ev->window);
+
+    if (c) {
+        if (c->deco) {
+            deco_cleanup(wm, c->deco);
+            c->deco = NULL;
+        }
         unmanage(wm, ev->window);
+    } else if (menu_owns_window(ev->window)) {
+        menu_window_gone(wm, ev->window);
+    } else {
+        client_t *c2 = find_client_by_deco(wm, ev->event);
+        if (c2 && c2->deco) {
+            deco_cleanup(wm, c2->deco);
+            c2->deco = NULL;
+            unmanage(wm, c2->win);
+        }
+    }
 }
 
 /* Tiled clients own their geometry: refuse the request but acknowledge per
@@ -255,7 +290,18 @@ handle_configure_request(wm_t *wm, xcb_configure_request_event_t *ev)
     uint32_t vals[5];
     int n = 0;
 
-    if (!c || c->floating) {
+    if (!c)
+        return;
+    if (c->deco) {
+        /* Reparented clients can't be placed by app coords (the wrapper
+         * owns root position). Honor size changes in place. */
+        unsigned w = (mask & XCB_CONFIG_WINDOW_WIDTH) ? ev->width : c->w;
+        unsigned h = (mask & XCB_CONFIG_WINDOW_HEIGHT) ? ev->height : c->h;
+
+        apply_geom(wm, c, c->x, c->y, w, h);
+        return;
+    }
+    if (c->floating) {
         if (mask & XCB_CONFIG_WINDOW_X)
             vals[n++] = (uint32_t)ev->x;
         if (mask & XCB_CONFIG_WINDOW_Y)
@@ -266,6 +312,10 @@ handle_configure_request(wm_t *wm, xcb_configure_request_event_t *ev)
             vals[n++] = ev->height;
         if (mask & XCB_CONFIG_WINDOW_BORDER_WIDTH)
             vals[n++] = ev->border_width;
+        /* We place by explicit coords only; sibling/stack bits would
+         * read beyond vals[] (we never fill slots 5/6). */
+        mask &= ~(XCB_CONFIG_WINDOW_SIBLING |
+            XCB_CONFIG_WINDOW_STACK_MODE);
         if (n)
             xcb_configure_window(wm->conn, ev->window, mask, vals);
 
@@ -291,37 +341,6 @@ handle_configure_request(wm_t *wm, xcb_configure_request_event_t *ev)
         (const char *)&sn);
 }
 
-/* Test seam: Xephyr cannot synthesize real RandR monitor changes, so
- * contrib/monpoke posts packed rect lists; production path is
- * monitors_refresh() on RandR events. Layout: u8 count, then per
- * monitor x,y,w,h as native-endian u16 pairs in data8[]. */
-static void
-apply_test_monitors(wm_t *wm, const xcb_client_message_event_t *ev)
-{
-    Rect rects[2];
-    unsigned n = (unsigned char)ev->data.data8[0];
-
-    if (n > 2)
-        n = 2;
-    for (unsigned i = 0; i < n; i++) {
-        const uint8_t *p = (const uint8_t *)ev->data.data8 + 1 + 8 * i;
-        uint16_t x, y, w, h;
-
-        memcpy(&x, p, 2);
-        memcpy(&y, p + 2, 2);
-        memcpy(&w, p + 4, 2);
-        memcpy(&h, p + 6, 2);
-        rects[i].x = (int16_t)x;
-        rects[i].y = (int16_t)y;
-        rects[i].w = w;
-        rects[i].h = h;
-    }
-    monitors_apply(wm, rects, n);
-    arrange(wm);
-    if (wm->focused && !ws_shown(wm->focused->ws))
-        refocus_ws(wm, workspaces[wm->focused->ws].mon->ws_visible);
-}
-
 static void
 handle_randr(wm_t *wm)
 {
@@ -337,10 +356,6 @@ handle_client_message(wm_t *wm, xcb_client_message_event_t *ev)
     atoms_t *a = wm->atoms;
     client_t *c;
 
-    if (ev->type == a->austere_test_monitors) {
-        apply_test_monitors(wm, ev);
-        return;
-    }
     if (ev->type == a->net_current_desktop) {
         view_ws(wm, ev->data.data32[0]);
         return;
@@ -353,7 +368,7 @@ handle_client_message(wm_t *wm, xcb_client_message_event_t *ev)
     }
     if (ev->type == a->net_close_window) {
         if ((c = find_client(wm, ev->window)))
-            send_delete(wm, c);
+            client_close(wm, c);
         return;
     }
     if (ev->type == a->net_wm_state) {
@@ -366,7 +381,7 @@ handle_client_message(wm_t *wm, xcb_client_message_event_t *ev)
             ev->data.data32[2] == a->net_wm_state_fullscreen) {
             bool on = action == 1
                 ? true
-                : action == 0 ? !c->fullscreen : false;
+                : action == 2 ? !c->fullscreen : false;
 
             if (on != c->fullscreen) {
                 c->fullscreen = on;
@@ -400,6 +415,24 @@ handle_property_notify(wm_t *wm, xcb_property_notify_event_t *ev)
         client_refresh_name(wm, c);
         bar_render_all(wm);
     }
+    if (ev->atom == a->net_wm_state) {
+        size_t slen = 0;
+        xcb_atom_t *states = get_property(wm, c->win, a->net_wm_state,
+            XCB_ATOM_ATOM, 32, &slen);
+        bool fs = false;
+
+        for (size_t i = 0; i < slen / sizeof(xcb_atom_t); i++)
+            if (states[i] == a->net_wm_state_fullscreen) {
+                fs = true;
+                break;
+            }
+        free(states);
+        if (fs != c->fullscreen) {
+            c->fullscreen = fs;
+            ewmh_set_fullscreen(wm, c, fs);
+            arrange(wm);
+        }
+    }
 }
 
 static void
@@ -422,6 +455,9 @@ handle_event(wm_t *wm, xcb_generic_event_t *ev)
     switch (ev->response_type & 0x7f) {
     case XCB_KEY_PRESS:
         handle_key_press(wm, (xcb_key_press_event_t *)ev);
+        break;
+    case XCB_KEY_RELEASE:
+        menu_key_release(wm, (xcb_key_release_event_t *)ev);
         break;
     case XCB_MAP_REQUEST:
         handle_map_request(wm, (xcb_map_request_event_t *)ev);
@@ -454,6 +490,8 @@ handle_event(wm_t *wm, xcb_generic_event_t *ev)
         if (menu_overlay_button(wm, bev->event, bev->event_x,
                 bev->event_y, bev->detail, bev->time))
             break;
+        if (deco_button_hit(wm, bev, bev->detail))
+            break;
         if (!bar_button(wm, bev->event, bev->event_x, bev->detail))
             mouse_press(wm, bev);
         break;
@@ -461,6 +499,12 @@ handle_event(wm_t *wm, xcb_generic_event_t *ev)
     case XCB_EXPOSE:
         if (menu_owns_window(((xcb_expose_event_t *)ev)->window))
             menu_expose(wm);
+        else if (find_client_by_deco(wm,
+            ((xcb_expose_event_t *)ev)->window))
+            deco_draw(wm, find_client_by_deco(wm,
+                ((xcb_expose_event_t *)ev)->window));
+        else
+            bar_expose(wm, ((xcb_expose_event_t *)ev)->window);
         break;
     case XCB_MOTION_NOTIFY:
         mouse_motion(wm, (xcb_motion_notify_event_t *)ev);
@@ -511,7 +555,6 @@ event_loop(wm_t *wm)
     struct pollfd all[64];
     xcb_generic_event_t *ev;
     char buf[16];
-    int hw_idx = -1;
     int sk_idx = -1;
 
     memcpy(all, fds, sizeof(fds));
@@ -543,23 +586,11 @@ event_loop(wm_t *wm)
             nfds++;
         } else
             sk_idx = -1;
-        int hw = hotwatch_fd();
-
-        if (hw >= 0 && nfds < 64) {
-            all[nfds].fd = hw;
-            all[nfds].events = POLLIN;
-            hw_idx = (int)nfds;
-            nfds++;
-        } else
-            hw_idx = -1;
         int timeout = bar_timeout_ms(wm);
         int pt = popups_timeout_ms(wm);
-        int ht = hotwatch_timeout_ms();
 
         if (pt >= 0 && (timeout < 0 || pt < timeout))
             timeout = pt;
-        if (ht >= 0 && (timeout < 0 || ht < timeout))
-            timeout = ht;
 
         int r = poll(all, nfds, timeout);
 
@@ -572,8 +603,6 @@ event_loop(wm_t *wm)
         }
 
         if (r == 0) {
-            if (hotwatch_fire())
-                settings_reload(wm);
             bar_render_all(wm); /* minute tick */
             popups_tick(wm);
             continue;
@@ -581,9 +610,7 @@ event_loop(wm_t *wm)
 
         for (unsigned i = 2; i < nfds; i++) {
             if (all[i].revents & (POLLIN | POLLHUP)) {
-                if ((int)i == hw_idx)
-                    hotwatch_pump();
-                else if ((int)i == sk_idx)
+                if ((int)i == sk_idx)
                     socket_handle(wm);
                 else
                     bar_pump_fd(wm, all[i].fd);
@@ -593,15 +620,13 @@ event_loop(wm_t *wm)
         if (all[1].revents & POLLIN) {
             bool reload_req = false;
 
-            while (read(wm->pipe[0], buf, sizeof(buf)) > 0)
-                for (ssize_t i = 0; i < (ssize_t)sizeof(buf); i++)
+            ssize_t nread;
+            while ((nread = read(wm->pipe[0], buf, sizeof(buf))) > 0)
+                for (ssize_t i = 0; i < nread; i++)
                     if (buf[i] == 'r')
                         reload_req = true;
             if (reload_req)
                 settings_reload(wm);
         }
-
-        if (hotwatch_fire())
-            settings_reload(wm);
     }
 }

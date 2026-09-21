@@ -3,23 +3,41 @@
 #include <string.h>
 #include <strings.h>
 
-#include "font_agave.h"
+#include <fontconfig/fontconfig.h>
+#include <ft2build.h>
+#include FT_FREETYPE_H
+
 #include "settings.h"
 #include "draw.h"
 #include "util.h"
 
+#define GLYPH_CACHE_BITS 10 /* slots per font: 1024 characters */
+#define GLYPH_CACHE_SIZE (1u << GLYPH_CACHE_BITS)
+#define MAX_FACES 8 /* primary + fallbacks from FcFontSort */
+
 struct font {
     char name[128];
-    xcb_font_t id;
-    const builtin_font_t *builtin; /* non-NULL: embedded bitmap font */
+    FT_Face faces[MAX_FACES];
+    unsigned nfaces;
     unsigned ascent;
     unsigned descent;
-    xcb_charinfo_t *infos;
-    unsigned n_infos;
-    unsigned min_char;
-    unsigned default_char;
+    struct glyph {
+        uint32_t cp;
+        FT_UInt idx;
+        FT_Face face;
+        unsigned advance;
+        int off_x;
+        unsigned off_y; /* rows above the baseline */
+        unsigned w, h;
+        uint8_t *cov; /* NULL until rasterized */
+    } cache[GLYPH_CACHE_SIZE];
     font_t *next;
 };
+
+typedef struct glyph glyph_t;
+
+static void gc_fg(wm_t *wm, draw_t *d, uint32_t color);
+static glyph_t *glyph_get(const font_t *f, uint32_t cp, bool render);
 
 /* Decode one UTF-8 sequence; advances *p, returns codepoint (0 on
  * malformed). */
@@ -57,161 +75,127 @@ utf8_cp(const char **p, const char *end)
             return 0;
         cp = (cp << 6) | (c & 0x3f);
     }
+    (*p)++;
     return cp;
 }
 
-/* Offset of an extended glyph in the bits array, or (size_t)-1. */
-static size_t
-ext_off(const builtin_font_t *b, uint32_t cp)
+static FT_Library
+ftlib(wm_t *wm)
 {
-    unsigned lo = 0, hi = b->ext_n;
+    if (!wm->ftlib) {
+        FT_Library lib;
 
-    if (!b->ext)
-        return (size_t)-1;
-    while (lo < hi) {
-        unsigned mid = lo + (hi - lo) / 2;
-
-        if (b->ext[mid].cp < cp)
-            lo = mid + 1;
-        else if (b->ext[mid].cp > cp)
-            hi = mid;
-        else
-            return b->ext[mid].off;
+        if (FT_Init_FreeType(&lib)) {
+            fprintf(stderr, "austere: freetype init failed\n");
+            exit(1);
+        }
+        wm->ftlib = lib;
     }
-    return (size_t)-1;
+    return (FT_Library)wm->ftlib;
 }
 
-/* Glyph advance in pixels from the cached metrics. */
-static unsigned
-char_w(const font_t *f, unsigned char c)
+font_t *
+draw_font(wm_t *wm, const char *pattern)
 {
-    const xcb_charinfo_t *ci;
+    if (!pattern || !*pattern)
+        pattern = DRAW_DEFAULT_FONT;
 
-    if (!f->infos)
-        return 8;
-    if (c < f->n_infos)
-        ci = &f->infos[c];
+    for (font_t *f = wm->fonts; f; f = f->next)
+        if (!strcmp(f->name, pattern))
+            return f;
+
+    FcPattern *pat = FcNameParse((const FcChar8 *)pattern);
+    int px = 16;
+
+    if (!pat) {
+        fprintf(stderr, "austere: bad font pattern '%s'\n", pattern);
+        return draw_font(wm, DRAW_DEFAULT_FONT);
+    }
+    char got_family[128], req_family[128];
+    FcChar8 *gf;
+    FcPatternGetString(pat, FC_FAMILY, 0, &gf);
+    if (gf)
+        snprintf(req_family, sizeof(req_family), "%s", gf);
     else
-        ci = &f->infos[f->default_char < f->n_infos ? f->default_char
-                                                    : 0];
-    return (unsigned)ci->character_width;
-}
+        req_family[0] = '\0';
+    FcDefaultSubstitute(pat);
+    FcConfigSubstitute(NULL, pat, FcMatchPattern);
+    FcPatternGetInteger(pat, FC_PIXEL_SIZE, 0, &px);
+    FcResult result;
+    FcFontSet *set = FcFontSort(NULL, pat, FcFalse, NULL, &result);
+    gf = NULL;
+    if (set && set->nfont &&
+        FcPatternGetString(set->fonts[0], FC_FAMILY, 0, &gf) ==
+            FcResultMatch)
+        snprintf(got_family, sizeof(got_family), "%s", gf);
+    else
+        got_family[0] = '\0';
+    FcPatternDestroy(pat);
 
-/* The UI-wide font: "agave-NN" (embedded Agave Nerd, pixel size NN),
- * any other string = server core font XLFD, empty = embedded default. */
-static bool
-ci_has(const char *hay, const char *needle)
-{
-    size_t n = strlen(needle);
+    font_t *f = xmalloc(sizeof(*f));
+    snprintf(f->name, sizeof(f->name), "%s", pattern);
+    f->nfaces = 0;
+    f->ascent = 0;
+    f->descent = 0;
+    memset(f->cache, 0, sizeof(f->cache));
+    f->next = wm->fonts;
 
-    for (; *hay; hay++)
-        if (!strncasecmp(hay, needle, n))
-            return true;
-    return false;
-}
+    FT_Library lib = ftlib(wm);
 
-static const builtin_font_t *
-ui_select(void)
-{
-    /* font = pixel size digits ("18"), the embedded face in any human
-     * spelling with optional size ("Agave Nerd Font", "agave mono 20"),
-     * or a core font XLFD string. */
-    const char *f = cfg.font;
-    bool agave = f && ci_has(f, "agave");
-    bool sized = f && strspn(f, "0123456789 ") == strlen(f) && *f;
+    if (set) {
+        for (int i = 0; i < set->nfont && f->nfaces < MAX_FACES; i++) {
+            FcPattern *fp = set->fonts[i];
+            FcChar8 *file = NULL;
+            int index = 0;
+            FT_Face face;
 
-    if (!f || !*f)
-        return builtin_fonts[2];
-    if (!agave && !sized)
-        return NULL; /* server XLFD */
-
-    long px = -1;
-
-    if (sized) {
-        px = strtol(f, NULL, 10);
-    } else {
-        const char *d = f;
-
-        while (*d && (*d < '0' || *d > '9'))
-            d++;
-        if (*d)
-            px = strtol(d, NULL, 10);
+            if (FcPatternGetString(fp, FC_FILE, 0, &file) !=
+                    FcResultMatch)
+                continue;
+            FcPatternGetInteger(fp, FC_INDEX, 0, &index);
+            if (FT_New_Face(lib, (const char *)file, index, &face))
+                continue;
+            FT_Set_Pixel_Sizes(face, 0, px);
+            if (f->nfaces == 0 || f->ascent == 0) {
+                f->ascent =
+                    (unsigned)((face->size->metrics.ascender + 32) / 64);
+                f->descent = (unsigned)
+                    ((-face->size->metrics.descender + 32) / 64);
+                if (f->ascent == 0 && f->descent == 0) {
+                    f->ascent = (px + 1) / 2;
+                    f->descent = px - f->ascent;
+                }
+            }
+            f->faces[f->nfaces++] = face;
+        }
+        FcFontSetDestroy(set);
     }
-    if (px < 0)
-        return builtin_fonts[2];
-    const builtin_font_t *best = builtin_fonts[0];
 
-    for (unsigned i = 0; builtin_fonts[i]; i++)
-        if (atoi(builtin_fonts[i]->name + 5) <= px)
-            best = builtin_fonts[i];
-    return best;
+    if (f->nfaces == 0) {
+        free(f);
+        if (strcmp(pattern, DRAW_DEFAULT_FONT)) {
+            fprintf(stderr, "austere: no font for '%s'\n", pattern);
+            return draw_font(wm, DRAW_DEFAULT_FONT);
+        }
+        fprintf(stderr, "austere: cannot load any font\n");
+        exit(1);
+    }
+    if (!f->ascent)
+        f->ascent = (px + 1) / 2;
+    if (!f->descent)
+        f->descent = px - f->ascent;
+    if (*req_family && *got_family &&
+        strcasecmp(req_family, got_family))
+        fprintf(stderr, "austere: font '%s' resolved to '%s', not '%s'\n",
+            pattern, got_family, req_family);
+    wm->fonts = f;
+    return f;
 }
 
 font_t *
 draw_ui_font(wm_t *wm)
 {
-    static font_t builtin;
-    const builtin_font_t *b = ui_select();
-
-    if (b) {
-        builtin.builtin = b;
-        builtin.ascent = b->ascent;
-        builtin.descent = b->descent;
-        builtin.id = XCB_NONE;
-        return &builtin;
-    }
     return draw_font(wm, cfg.font && *cfg.font ? cfg.font : NULL);
-}
-
-font_t *
-draw_font(wm_t *wm, const char *xlfd)
-{
-    if (!xlfd || !*xlfd)
-        xlfd = DRAW_DEFAULT_FONT;
-
-    for (font_t *f = wm->fonts; f; f = f->next)
-        if (!strcmp(f->name, xlfd))
-            return f;
-
-    xcb_font_t id = xcb_generate_id(wm->conn);
-    size_t len = strlen(xlfd);
-
-    xcb_open_font(wm->conn, id, (uint16_t)len, xlfd);
-    xcb_query_font_cookie_t ck = xcb_query_font(wm->conn, id);
-    xcb_query_font_reply_t *r = xcb_query_font_reply(wm->conn, ck, NULL);
-    font_t *f;
-
-    if (!r) {
-        /* Font missing: fall back to the universal alias once. */
-        if (strcmp(xlfd, DRAW_DEFAULT_FONT))
-            return draw_font(wm, DRAW_DEFAULT_FONT);
-        fprintf(stderr, "austere: cannot load font '%s'\n", xlfd);
-        exit(1);
-    }
-
-    f = xmalloc(sizeof(*f));
-    snprintf(f->name, sizeof(f->name), "%s", xlfd);
-    f->builtin = NULL;
-    f->id = id;
-    f->ascent = r->font_ascent;
-    f->descent = r->font_descent;
-    f->min_char = r->min_char_or_byte2;
-    f->default_char =
-        (unsigned)(r->default_char - r->min_char_or_byte2);
-    f->next = wm->fonts;
-    f->infos = NULL;
-    f->n_infos = 0;
-    int n = xcb_query_font_char_infos_length(r);
-
-    if (n > 0) {
-        f->infos = xmalloc((size_t)n * sizeof(xcb_charinfo_t));
-        memcpy(f->infos, xcb_query_font_char_infos(r),
-            (size_t)n * sizeof(xcb_charinfo_t));
-        f->n_infos = (unsigned)n;
-    }
-    free(r);
-    wm->fonts = f;
-    return f;
 }
 
 unsigned
@@ -226,125 +210,216 @@ font_ascent(const font_t *f)
     return f ? f->ascent : 0;
 }
 
+static void
+glyph_rasterize(glyph_t *g)
+{
+    FT_GlyphSlot sl;
+
+    if (FT_Load_Glyph(g->face, g->idx, FT_LOAD_RENDER))
+        return;
+    sl = g->face->glyph;
+    g->off_x = sl->bitmap_left;
+    g->off_y = sl->bitmap_top;
+    g->w = sl->bitmap.width;
+    g->h = sl->bitmap.rows;
+
+    if (g->w && g->h) {
+        g->cov = xmalloc((size_t)g->w * g->h);
+        for (unsigned r = 0; r < g->h; r++)
+            memcpy(g->cov + (size_t)r * g->w,
+                sl->bitmap.buffer + (size_t)r * sl->bitmap.pitch,
+                g->w);
+    }
+}
+
+/* Cache lookup for one codepoint. A cache miss resolves which face
+ * carries the glyph (the primary face unless it lacks it) and reads its
+ * advance; rasterization is deferred until a draw actually needs the
+ * pixels so draw_text_w stays cheap. */
+static glyph_t *
+glyph_get(const font_t *f, uint32_t cp, bool render)
+{
+    glyph_t *g = (glyph_t *)&f->cache[cp & (GLYPH_CACHE_SIZE - 1)];
+
+    if (g->cp != cp) {
+        FT_Face face = NULL;
+        FT_UInt idx = 0;
+
+        for (unsigned i = 0; i < f->nfaces; i++) {
+            idx = FT_Get_Char_Index(f->faces[i], cp);
+            if (idx) {
+                face = f->faces[i];
+                break;
+            }
+        }
+        if (!face) {
+            face = f->faces[0];
+            idx = 0; /* .notdef */
+        }
+        if (g->cov)
+            free(g->cov);
+        g->cp = cp;
+        g->idx = idx;
+        g->face = face;
+        g->cov = NULL;
+        g->w = g->h = 0;
+        g->off_x = 0;
+        g->off_y = 0;
+        g->advance = 0;
+        if (!FT_Load_Glyph(face, idx, FT_LOAD_DEFAULT))
+            g->advance =
+                (unsigned)((face->glyph->advance.x + 32) / 64);
+        if (!g->advance)
+            g->advance = f->ascent ? f->ascent : 8;
+    }
+    if (render && !g->cov)
+        glyph_rasterize(g);
+    return g;
+}
+
 unsigned
 draw_text_w(wm_t *wm, const font_t *f, const char *s, unsigned len)
 {
+    const char *p = s, *e = s + len;
     unsigned w = 0;
 
     (void)wm;
     if (!f)
         return 0;
-    if (f->builtin) {
-        const char *p = s, *e = s + len;
+    while (p < e) {
+        uint32_t cp = utf8_cp(&p, e);
 
-        while (p < e) {
-            if (!utf8_cp(&p, e))
-                continue;
-            w += f->builtin->advance;
-        }
-        return w;
+        if (!cp)
+            continue;
+        w += glyph_get(f, cp, false)->advance;
     }
-    for (unsigned i = 0; i < len && s[i]; i++)
-        w += char_w(f, (unsigned char)s[i]);
     return w;
 }
 
+static uint32_t
+blend(uint32_t fg, uint32_t bg, uint32_t cov)
+{
+    uint32_t r = ((fg >> 16 & 0xff) * cov + (bg >> 16 & 0xff) *
+        (255 - cov) + 127) / 255;
+    uint32_t g = ((fg >> 8 & 0xff) * cov + (bg >> 8 & 0xff) *
+        (255 - cov) + 127) / 255;
+    uint32_t b = ((fg & 0xff) * cov + (bg & 0xff) * (255 - cov) + 127) /
+        255;
+
+    return (fg & 0xff000000u) | r << 16 | g << 8 | b;
+}
+
 void
-draw_text(wm_t *wm, const draw_t *d, const font_t *f, int x,
+draw_text(wm_t *wm, draw_t *d, const font_t *f, int x,
     int y_baseline, const char *s, unsigned len, uint32_t fg,
     uint32_t bg)
 {
+    const char *p = s, *e = s + len;
+    unsigned asc, desc, h, w = 0;
+    uint32_t *buf;
+
     if (!len || !s || !f)
         return;
+    asc = f->ascent;
+    desc = f->descent;
+    h = asc + desc;
+    if (!h)
+        return;
 
-    if (f->builtin) {
-        /* embedded Agave: glyphs carry 4-bit coverage; every lit pixel
-         * blends fg toward the caller's bg so edges antialias against
-         * whatever they sit on. Runs of equal coverage share a rect. */
-        const builtin_font_t *b = f->builtin;
-        const char *p = s, *e = s + len;
-        unsigned br = (bg >> 16) & 0xff, bgc = (bg >> 8) & 0xff,
-            bb = bg & 0xff;
-        int cx = x;
+    while (p < e) {
+        uint32_t cp = utf8_cp(&p, e);
 
-        while (p < e) {
-            uint32_t cp = utf8_cp(&p, e);
-            size_t off = (size_t)-1;
+        if (!cp)
+            continue;
+        w += glyph_get(f, cp, false)->advance;
+    }
+    if (!w)
+        return;
 
-            if (!cp)
-                continue;
-            if (cp >= 32u && cp < 32u + b->nglyph)
-                off = (size_t)(cp - 32) * b->rowbytes * b->cell_h;
-            else
-                off = ext_off(b, cp);
-            if (off == (size_t)-1) {
-                cx += b->advance;
-                continue;
-            }
-            const uint8_t *g = b->bits + off;
-            int top = y_baseline - (int)b->ascent;
+    if (wm->textbuf_cap < (size_t)w * h) {
+        size_t need = (size_t)w * h;
 
-            for (unsigned row = 0; row < b->cell_h; row++) {
-                const uint8_t *r = g + row * b->rowbytes;
-                unsigned col = 0;
+        wm->textbuf = realloc(wm->textbuf, need * sizeof(uint32_t));
+        if (!wm->textbuf) {
+            wm->textbuf_cap = 0;
+            return;
+        }
+        wm->textbuf_cap = (unsigned)need;
+    }
+    buf = wm->textbuf;
+    for (size_t i = 0; i < (size_t)w * h; i++)
+        buf[i] = bg;
 
-                while (col < b->advance) {
-                    uint8_t cov = (col & 1)
-                        ? (uint8_t)(r[col >> 1] & 0xf)
-                        : (uint8_t)(r[col >> 1] >> 4);
+    p = s;
+    for (int pen = 0; p < e && (unsigned)pen < w;) {
+        uint32_t cp = utf8_cp(&p, e);
+        glyph_t *g;
 
-                    if (!cov) {
-                        col++;
+        if (!cp)
+            continue;
+        g = glyph_get(f, cp, true);
+        if (g->w && g->h) {
+            for (unsigned yy = 0; yy < g->h; yy++) {
+                int top = (int)asc - (int)g->off_y + (int)yy;
+                const uint8_t *cov = g->cov + (size_t)yy * g->w;
+
+                if (top < 0 || top >= (int)h)
+                    continue;
+                for (unsigned xx = 0; xx < g->w; xx++) {
+                    int left = pen + g->off_x + (int)xx;
+                    uint8_t c = cov[xx];
+                    uint32_t *px;
+
+                    if (left < 0 || left >= (int)w)
                         continue;
-                    }
-                    uint32_t c =
-                        ((((fg >> 16 & 0xff) * cov + br * (15 - cov) +
-                            7) / 15) << 16) |
-                        ((((fg >> 8 & 0xff) * cov + bgc * (15 - cov) +
-                            7) / 15) << 8) |
-                        (((fg & 0xff) * cov + bb * (15 - cov) + 7) /
-                            15);
-                    unsigned run = 1;
-
-                    while (col + run < b->advance &&
-                        (((col + run) & 1
-                                ? (uint8_t)(r[(col + run) >> 1] & 0xf)
-                                : (uint8_t)(r[(col + run) >> 1] >>
-                                4)) == cov))
-                        run++;
-                    xcb_rectangle_t rc = {
-                        (int16_t)(cx + (int)col),
-                        (int16_t)(top + (int)row), (uint16_t)run, 1
-                    };
-
-                    xcb_change_gc(wm->conn, d->gc, XCB_GC_FOREGROUND,
-                        (uint32_t[]){ c });
-                    xcb_poly_fill_rectangle(wm->conn, d->win, d->gc,
-                        1, &rc);
-                    col += run;
+                    px = buf + (size_t)top * w + (unsigned)left;
+                    if (c == 255)
+                        *px = fg;
+                    else if (c)
+                        *px = blend(fg, bg, c);
                 }
             }
-            cx += b->advance;
         }
-        return;
+        pen += (int)g->advance;
     }
 
-    /* image_text fills glyph cells with the GC background, so the bg
-     * must differ from fg or every glyph renders as a solid block. */
-    xcb_change_gc(wm->conn, d->gc,
-        XCB_GC_FOREGROUND | XCB_GC_BACKGROUND | XCB_GC_FONT,
-        (uint32_t[]){ fg, bg, f->id });
-    xcb_image_text_8(wm->conn, (uint8_t)len, d->win, d->gc,
-        (int16_t)x, (int16_t)y_baseline, s);
+    draw_put_image24(wm, d->win, d->gc, d->depth, (int16_t)x,
+        (int16_t)(y_baseline - (int)asc), w, h, buf);
 }
 
 void
 draw_setup(wm_t *wm, draw_t *d, xcb_window_t win)
 {
+    xcb_get_geometry_cookie_t ck;
+    xcb_get_geometry_reply_t *r;
+
     d->win = win;
     d->gc = xcb_generate_id(wm->conn);
+    d->gc_fg_known = false;
+    d->depth = (uint8_t)wm->scr->root_depth;
     xcb_create_gc(wm->conn, d->gc, win,
         XCB_GC_GRAPHICS_EXPOSURES, (uint32_t[]){ 0 });
+    ck = xcb_get_geometry(wm->conn, win);
+    r = xcb_get_geometry_reply(wm->conn, ck, NULL);
+    if (r) {
+        d->depth = (uint8_t)r->depth;
+        free(r);
+    }
+}
+
+/* Program the GC foreground once per distinct color: poly_fill only
+ * reads FOREGROUND, so a repeat change_gc for the same pixel is pure
+ * wire traffic. draw_text keeps this cache current for every path that
+ * sets fg. */
+static void
+gc_fg(wm_t *wm, draw_t *d, uint32_t color)
+{
+    if (d->gc_fg_known && d->gc_fg == color)
+        return;
+    xcb_change_gc(wm->conn, d->gc, XCB_GC_FOREGROUND,
+        (uint32_t[]){ color });
+    d->gc_fg = color;
+    d->gc_fg_known = true;
 }
 
 void
@@ -355,21 +430,85 @@ draw_shutdown(wm_t *wm)
     while (f) {
         font_t *next = f->next;
 
-        free(f->infos);
+        for (unsigned i = 0; i < GLYPH_CACHE_SIZE; i++)
+            free(f->cache[i].cov);
+        for (unsigned i = 0; i < f->nfaces; i++)
+            FT_Done_Face(f->faces[i]);
         free(f);
         f = next;
     }
     wm->fonts = NULL;
+    if (wm->ftlib) {
+        FT_Done_FreeType((FT_Library)wm->ftlib);
+        wm->ftlib = NULL;
+    }
+    FcFini();
+    free(wm->textbuf);
+    wm->textbuf = NULL;
+    wm->textbuf_cap = 0;
 }
 
 void
-draw_rect(wm_t *wm, const draw_t *d, int x, int y, unsigned w,
+draw_rect(wm_t *wm, draw_t *d, int x, int y, unsigned w,
     unsigned h, uint32_t color)
 {
     xcb_rectangle_t r = { (int16_t)x, (int16_t)y, (uint16_t)w,
         (uint16_t)h };
 
-    xcb_change_gc(wm->conn, d->gc, XCB_GC_FOREGROUND,
-        (uint32_t[]){ color });
+    gc_fg(wm, d, color);
     xcb_poly_fill_rectangle(wm->conn, d->win, d->gc, 1, &r);
+}
+
+static const xcb_format_t *
+fmt_for_depth(xcb_connection_t *conn, unsigned depth)
+{
+    const xcb_setup_t *setup = xcb_get_setup(conn);
+    xcb_format_iterator_t it = xcb_setup_pixmap_formats_iterator(setup);
+
+    while (it.rem) {
+        if (it.data->depth == depth)
+            return it.data;
+        xcb_format_next(&it);
+    }
+    return NULL;
+}
+
+void
+draw_put_image24(wm_t *wm, xcb_window_t win, xcb_gcontext_t gc,
+    uint8_t depth, int16_t x, int16_t y, unsigned w, unsigned h,
+    const uint32_t *argb)
+{
+    xcb_image_order_t order;
+    size_t psize, pad, row;
+    uint8_t *bytes;
+    const xcb_format_t *f = fmt_for_depth(wm->conn, depth);
+
+    if (f == NULL)
+        return;
+    /* Pack per the server's advertised Z-format for this depth:
+     * bits-per-pixel bytes each pixel (24-bit depth commonly maps to
+     * 4 bytes on modern servers), scanlines a multiple of scanline-pad. */
+    order = xcb_get_setup(wm->conn)->image_byte_order;
+    psize = f->bits_per_pixel / 8;
+    pad = f->scanline_pad / 8;
+    row = (w * psize + pad - 1) / pad * pad;
+    bytes = xmalloc(row * h);
+    memset(bytes, 0, row * h);
+
+    for (unsigned yy = 0; yy < h; yy++) {
+        uint8_t *dst = bytes + yy * row;
+
+        for (unsigned xx = 0; xx < w; xx++) {
+            uint32_t v = argb[yy * w + xx];
+            const uint8_t *s = (const uint8_t *)&v;
+
+            for (size_t k = 0; k < psize; k++)
+                dst[xx * psize + k] = order == XCB_IMAGE_ORDER_LSB_FIRST
+                    ? s[k]
+                    : s[psize - 1 - k];
+        }
+    }
+    xcb_put_image(wm->conn, XCB_IMAGE_FORMAT_Z_PIXMAP, win, gc,
+        (uint16_t)w, (uint16_t)h, x, y, 0, depth, row * h, bytes);
+    free(bytes);
 }

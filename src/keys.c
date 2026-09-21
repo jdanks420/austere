@@ -57,6 +57,16 @@ keysym_from_name(const char *s)
     for (int i = 0; keysym_tab[i].name; i++)
         if (!strcasecmp(keysym_tab[i].name, s))
             return keysym_tab[i].sym;
+    /* keysym_name() prints off-table keysyms as decimal; parse that
+     * back so a menu-captured NumLock or KP or dead-key bind survives
+     * save-reload instead of aborting the whole file. */
+    if (*s >= '0' && *s <= '9') {
+        char *end = NULL;
+        unsigned long v = strtoul(s, &end, 10);
+
+        if (end && *end == '\0' && v <= 0x10ffff && v != 0)
+            return (xcb_keysym_t)v;
+    }
     return 0;
 }
 
@@ -140,11 +150,13 @@ parse_bind(const char *combo, const char *action, bind_t *out)
     out->keysym = sym;
     out->action = id;
     out->arg = -1;
+    out->cmd[0] = '\0';
+    out->ncodes = 0; /* grab_keys resolves from keysym before dispatch */
     return true;
 }
 
 /* Compiled-in defaults mirror the historical bindings so existing
- * muscle memory and the smoke suite stay stable. */
+ * muscle memory stays stable. */
 void
 keys_defaults(settings_t *s)
 {
@@ -154,20 +166,20 @@ keys_defaults(settings_t *s)
     } rows[] = {
         { "super+m", "quit" },
         { "super+Return", "spawn_terminal" },
-        { "super+space", "spawn_terminal" },
         { "alt+q", "close_focused" },
         { "super+s", "cycle_layout" },
-        { "super+Left", "focus_column_left" },
-        { "super+Right", "focus_column_right" },
-        { "super+shift+space", "toggle_float" },
+        { "super+f", "toggle_fullscreen" },
         { "super+h", "ratio_shrink" },
         { "super+l", "ratio_grow" },
-        { "super+Tab", "mru_step" },
         { "alt+Tab", "show_switcher" },
+        { "alt+shift+Tab", "show_switcher" },
+        { "super+w", "show_switcher" },
+        { "super+Tab", "mru_step" },
         { "alt+space", "show_launcher" },
         { "super+grave", "menu_states" },
         { "super+p", "scratch_toggle" },
-        { "super+g", "scratch_mark" },
+        { "super+shift+s", "scratch_mark" },
+        { "super+g", "toggle_float" },
         { "super+ctrl+m", "ws_to_monitor" },
         { "super+d", "menu_apps" },
         { "super+e", "menu_settings" },
@@ -175,6 +187,13 @@ keys_defaults(settings_t *s)
         { "super+shift+r", "restart" },
         { "alt+r", "wallpaper_random" },
         { "alt+w", "wallpaper_pick" },
+        { "alt+Left", "focus_left" },
+        { "alt+Right", "focus_right" },
+        { "alt+Up", "focus_up" },
+        { "alt+Down", "focus_down" },
+        { "XF86AudioRaiseVolume", "volume_raise" },
+        { "XF86AudioLowerVolume", "volume_lower" },
+        { "XF86AudioMute", "volume_mute" },
     };
 
     s->nbinds = 0;
@@ -186,28 +205,45 @@ keys_defaults(settings_t *s)
             s->binds[s->nbinds++] = b;
     }
     for (unsigned d = 0; d < WS_MAX && s->nbinds + 1 < MAX_BINDS; d++) {
-        bind_t b = { XCB_MOD_MASK_4, '1' + d,
-            ACT_VIEW_WS, (int)d };
-        bind_t sb = { XCB_MOD_MASK_4 | XCB_MOD_MASK_SHIFT, '1' + d,
-            ACT_SEND_WS, (int)d };
+        bind_t b = { .mods = XCB_MOD_MASK_4, .keysym = (xcb_keysym_t)('1' + d),
+            .action = ACT_VIEW_WS, .arg = (int)d };
+        bind_t sb = { .mods = XCB_MOD_MASK_4 | XCB_MOD_MASK_SHIFT,
+            .keysym = (xcb_keysym_t)('1' + d), .action = ACT_SEND_WS,
+            .arg = (int)d };
 
         s->binds[s->nbinds++] = b;
         s->binds[s->nbinds++] = sb;
     }
 }
 
+/* Resolve a bind's keysym to concrete keycodes and cache them. The
+ * symbols table is a server snapshot; refreshing here (every grab_keys
+ * — boot, reload, menu re-bind) keeps the cache in lockstep with the
+ * grabs. */
+static void
+bind_resolve_keycodes(wm_t *wm, bind_t *b)
+{
+    xcb_keycode_t *codes = xcb_key_symbols_get_keycode(wm->keysyms,
+        b->keysym);
+    unsigned n = 0;
+
+    for (xcb_keycode_t *k = codes; k && *k && n < 8; k++)
+        b->codes[n++] = *k;
+    b->ncodes = (uint8_t)n;
+    free(codes);
+}
+
 void
 grab_keys(wm_t *wm)
 {
     for (unsigned i = 0; i < cfg.nbinds; i++) {
-        xcb_keycode_t *codes = xcb_key_symbols_get_keycode(wm->keysyms,
-            cfg.binds[i].keysym);
+        bind_t *b = &cfg.binds[i];
 
-        for (xcb_keycode_t *k = codes; k && *k; k++)
-            xcb_grab_key(wm->conn, 1, wm->scr->root,
-                cfg.binds[i].mods, *k, XCB_GRAB_MODE_ASYNC,
+        bind_resolve_keycodes(wm, b);
+        for (unsigned k = 0; k < b->ncodes; k++)
+            xcb_grab_key(wm->conn, 1, wm->scr->root, b->mods,
+                b->codes[k], XCB_GRAB_MODE_ASYNC,
                 XCB_GRAB_MODE_ASYNC);
-        free(codes);
     }
 }
 

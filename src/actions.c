@@ -7,10 +7,6 @@ static const action_ent_t registry[] = {
     { "spawn_terminal", ACT_SPAWN_TERMINAL },
     { "close_focused", ACT_CLOSE_FOCUSED },
     { "cycle_layout", ACT_CYCLE_LAYOUT },
-    { "focus_column_left", ACT_FOCUS_COLUMN_LEFT },
-    { "focus_column_right", ACT_FOCUS_COLUMN_RIGHT },
-    { "scroll_left", ACT_SCROLL_LEFT },
-    { "scroll_right", ACT_SCROLL_RIGHT },
     { "set_layout", ACT_SET_LAYOUT }, /* +layout name via socket */
     { "toggle_float", ACT_TOGGLE_FLOAT },
     { "ratio_shrink", ACT_MWFACT_DEC },
@@ -35,6 +31,18 @@ static const action_ent_t registry[] = {
     { "wallpaper_random", ACT_WALLPAPER_RANDOM },
     { "wallpaper_next", ACT_WALLPAPER_NEXT },
     { "wallpaper_pick", ACT_WALLPAPER_PICK },
+    { "toggle_fullscreen", ACT_FULLSCREEN },
+    { "maximize", ACT_MAXIMIZE },
+    { "restore_minimized", ACT_RESTORE_MINIMIZED },
+    { "toggle_deco", ACT_TOGGLE_DECO },
+    { "focus_left", ACT_FOCUS_LEFT },
+    { "focus_right", ACT_FOCUS_RIGHT },
+    { "focus_up", ACT_FOCUS_UP },
+    { "focus_down", ACT_FOCUS_DOWN },
+    { "exec", ACT_EXEC }, /* +command in bind: launch program/script */
+    { "volume_raise", ACT_VOL_RAISE },
+    { "volume_lower", ACT_VOL_LOWER },
+    { "volume_mute", ACT_VOL_MUTE },
     { NULL, 0 },
 };
 

@@ -7,9 +7,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "bar.h"
+#include "module.h"
 #include "popup.h"
 #include "util.h"
 
@@ -45,10 +47,13 @@ module_spawn_script(wm_t *wm, module_t *m)
         _exit(127);
     }
     close(pfd[1]);
+    free(m->frame);
+    m->frame = xmalloc(BAR_FRAME_MAX);
     m->fd = pfd[0];
     m->pid = pid;
     m->dead = false;
     m->blen = 0;
+    m->flen = 0;
     (void)wm;
     fprintf(stderr, "austere: script module '%s' spawned\n", m->name);
 }
@@ -80,7 +85,7 @@ module_pump(wm_t *wm, module_t *m)
             }
             continue;
         }
-        if (r == 0 || errno != EAGAIN)
+        if (r == 0 || (errno != EAGAIN && errno != EINTR))
             died = true;
         break;
     }
@@ -104,11 +109,33 @@ module_kill(wm_t *wm, module_t *m)
     if (m->fd >= 0)
         close(m->fd);
     m->fd = -1;
+    bool gone = false;
+
     if (m->pid > 0) {
+        /* A script that ignores SIGTERM would hang bar teardown
+         * forever; give it a bounded grace then SIGKILL. */
+        struct timespec t = { 0, 20000000L };
+
         kill(m->pid, SIGTERM);
-        waitpid(m->pid, NULL, 0);
+        for (int i = 0; i < 25; i++) {
+            if (waitpid(m->pid, NULL, WNOHANG) == m->pid) {
+                gone = true;
+                break;
+            }
+            nanosleep(&t, NULL);
+        }
+        if (!gone) {
+            kill(m->pid, SIGKILL);
+            waitpid(m->pid, NULL, 0);
+        }
         m->pid = -1;
     }
     free(m->exec);
     m->exec = NULL;
+    free(m->frame);
+    m->frame = NULL;
+    m->flen = 0;
+    m->blen = 0;
+    free(m->data);
+    m->data = NULL;
 }

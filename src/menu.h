@@ -19,16 +19,19 @@ typedef struct {
     unsigned nrows;
     bool filter;        /* typing filters rows by substring */
     bool tab_complete;  /* Tab completes common prefix (launcher) */
+    bool hold_alt;      /* closing Alt release closes the panel */
+    unsigned init_sel;  /* preselected row at open; live-previewed once */
     /* return true to keep the panel open (input may be replaced via
      * panel_set_input — bare module selection in the launcher) */
     bool (*on_enter)(wm_t *wm, const char *input, const char *row);
+    /* called whenever the selection changes (live preview/switch) */
+    void (*on_preview)(wm_t *wm, const char *row);
     void (*on_close)(wm_t *wm);
     unsigned px_w;   /* fixed width; 0 = centered 3/5 monitor */
     bool anchor_bar; /* hug the bar edge beside the logo, full height */
 } panel_def_t;
 
 void panel_open(wm_t *wm, const panel_def_t *def);
-const char *panel_input(void);
 void panel_set_input(const char *s);
 
 /* Full-screen overlay (wallpaper grid): owns keys while active. */
@@ -52,9 +55,12 @@ bool menu_overlay_button(wm_t *wm, xcb_window_t win, int16_t x,
 
 void menu_open(wm_t *wm);
 void menu_close(wm_t *wm);
+void menu_window_gone(wm_t *wm, xcb_window_t w);
 bool menu_active(void);
+void menu_bump(wm_t *wm); /* panel stays topmost over any raised client */
 bool menu_owns_window(xcb_window_t win);
 void menu_key(wm_t *wm, xcb_key_press_event_t *ev);
+void menu_key_release(wm_t *wm, xcb_key_release_event_t *ev);
 void menu_expose(wm_t *wm);
 
 #endif

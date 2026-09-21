@@ -7,7 +7,7 @@ live bar_bg at draw time so both variants stay correct under any theme.
 import subprocess
 import sys
 
-W, H = 18, 19
+W, H = 14, 15
 SVCS = [("logo_black", "black"), ("logo_white", "white")]
 
 

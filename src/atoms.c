@@ -35,7 +35,8 @@ atoms_init(atoms_t *a, xcb_connection_t *conn, int scr_index)
         "_NET_WORKAREA",
         "_NET_WM_WINDOW_TYPE",
         "_NET_WM_WINDOW_TYPE_DOCK",
-        "_AUSTERE_TEST_MONITORS",
+        "_NET_WM_WINDOW_TYPE_DIALOG",
+        "_NET_WM_WINDOW_TYPE_TOOLBAR",
     };
     enum { N = (int)(sizeof(names) / sizeof(names[0])) };
     xcb_intern_atom_cookie_t cookies[N];
@@ -65,7 +66,8 @@ atoms_init(atoms_t *a, xcb_connection_t *conn, int scr_index)
         &a->net_workarea,
         &a->net_wm_window_type,
         &a->net_wm_window_type_dock,
-        &a->austere_test_monitors,
+        &a->net_wm_window_type_dialog,
+        &a->net_wm_window_type_toolbar,
     };
 
     for (int i = 0; i < N; i++)

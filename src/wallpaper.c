@@ -4,8 +4,10 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <time.h>
 
 #include "draw.h"
+#include "bar.h"
 #include "menu.h"
 #include "monitor.h"
 #include "popup.h"
@@ -65,6 +67,8 @@ pool_scan(void)
         closedir(dp);
     }
 
+    sort_strs(tmp, n, false);
+
     bool same = n == npool;
 
     for (unsigned i = 0; same && i < n; i++)
@@ -107,6 +111,8 @@ pool_scan(void)
     if (n)
         memcpy(pool, tmp, n * sizeof(*pool));
     npool = n;
+
+    sort_strs(pool, npool, false);
 }
 
 static void
@@ -116,12 +122,21 @@ wp_apply(wm_t *wm, const char *path)
         popup_notify(wm, "wallpaper: setter lacks %%s");
         return;
     }
-    char *cmd = xmalloc(strlen(cfg.wp_setter) + strlen(path) + 1);
+    char *cmd;
+    size_t plen = strlen(path);
+    unsigned ns = 0;
     unsigned o = 0;
 
+    for (const char *p = cfg.wp_setter; *p; p++)
+        if (p[0] == '%' && p[1] == 's') {
+            ns++;
+            p++;
+        }
+    cmd = xmalloc(strlen(cfg.wp_setter) + ns * plen + 1);
     for (const char *p = cfg.wp_setter; *p; p++) {
         if (p[0] == '%' && p[1] == 's') {
-            o += (unsigned)sprintf(cmd + o, "%s", path);
+            memcpy(cmd + o, path, plen);
+            o += (unsigned)plen;
             p++;
         } else {
             cmd[o++] = *p;
@@ -138,6 +153,12 @@ wp_apply(wm_t *wm, const char *path)
 void
 wallpaper_random(wm_t *wm)
 {
+    static bool seeded;
+
+    if (!seeded) {
+        srand((unsigned)time(NULL));
+        seeded = true;
+    }
     pool_scan();
     if (!npool) {
         popup_notify(wm, "wallpaper pool is empty");
@@ -153,15 +174,6 @@ wallpaper_next(wm_t *wm)
     pool_scan();
     if (!npool)
         return;
-    /* sorted cycle */
-    for (unsigned i = 0; i < npool; i++)
-        for (unsigned j = i + 1; j < npool; j++)
-            if (strcmp(pool[i], pool[j]) > 0) {
-                char *t = pool[i];
-
-                pool[i] = pool[j];
-                pool[j] = t;
-            }
     last_index = (last_index + 1) % (long)npool;
     wp_apply(wm, pool[last_index]);
 }
@@ -230,25 +242,15 @@ draw_cell(wm_t *wm, unsigned i)
      * ring */
     draw_rect(wm, &pick_dc, x - bt, y - bt,
         (unsigned)(cell_w + 2 * bt), (unsigned)(cell_h + 2 * bt),
-        i == sel_cell ? cfg.focus_color : 0x303040);
+        i == sel_cell ? cfg.focus_color : cfg.bar_bg);
 
 #ifndef AUSTERE_NO_IMLIB2
     thumb_fill(i);
     if (thumb_cache && thumb_cache[i])
-        xcb_put_image(wm->conn,
-            XCB_IMAGE_FORMAT_Z_PIXMAP, pick_win,
-            pick_dc.gc, (uint16_t)cell_w, (uint16_t)cell_h,
-            (int16_t)x, (int16_t)y, 0,
-            wm->scr->root_depth,
-            cell_w * cell_h * 4,
-            (const uint8_t *)thumb_cache[i]);
+        draw_put_image24(wm, pick_win, pick_dc.gc,
+            (uint8_t)wm->scr->root_depth, (int16_t)x,
+            (int16_t)y, cell_w, cell_h, thumb_cache[i]);
 #endif
-    const char *base = strrchr(pool[i], '/');
-
-    base = base ? base + 1 : pool[i];
-    draw_text(wm, &pick_dc, draw_ui_font(wm), x,
-        y + (int)cell_h + 14, base, (unsigned)strlen(base),
-        i == sel_cell ? 0xffffff : 0x888888, 0x101018);
 }
 
 /* Wipe a cell's bbox back to panel background before repainting it. */
@@ -261,7 +263,7 @@ clear_cell_area(wm_t *wm, unsigned i)
     int y = (int)(40 + row * (cell_h + 22));
 
     draw_rect(wm, &pick_dc, x - 4, y - 4, cell_w + 8,
-        cell_h + 28, 0x101018);
+        cell_h + 28, cfg.bar_bg);
 }
 
 static bool
@@ -276,6 +278,9 @@ static void
 pick_draw(wm_t *wm)
 {
     monitor_t *mon = focused_mon(wm);
+
+    if (!mon)
+        return;
     unsigned w = mon->geom.w, h = mon->geom.h;
 
     cols = w / (cell_w + 8);
@@ -283,14 +288,7 @@ pick_draw(wm_t *wm)
         cols = 1;
     unsigned rows_vis = (h - 60) / (cell_h + 22);
 
-    draw_rect(wm, &pick_dc, 0, 0, w, h, 0x101018);
-    char hdr[96];
-
-    snprintf(hdr, sizeof(hdr),
-        "wallpaper - arrows move - Enter set - Esc close (%u items)",
-        npool);
-    draw_text(wm, &pick_dc, draw_ui_font(wm), 8, 16, hdr,
-        (unsigned)strlen(hdr), 0x888888, 0x101018);
+    rows_visible = rows_vis;
 
     if (sel_cell >= npool)
         sel_cell = npool - 1;
@@ -300,8 +298,7 @@ pick_draw(wm_t *wm)
         first_row = sel_cell / cols - rows_vis + 1;
 
     /* Pure navigation between on-screen cells repaints just those two;
-     * full-window clears flicker because put_image bursts exceed the
-     * socket buffer. Exposes and scrolls fall through to the full pass. */
+     * skip the full-window clear that causes visible flicker. */
     if (pick_partial && cell_visible(sel_cell) &&
         cell_visible(pick_prev_cell)) {
         clear_cell_area(wm, pick_prev_cell);
@@ -313,6 +310,14 @@ pick_draw(wm_t *wm)
     }
     pick_partial = false;
 
+    draw_rect(wm, &pick_dc, 0, 0, w, h, cfg.bar_bg);
+    char hdr[96];
+
+    snprintf(hdr, sizeof(hdr),
+        "wallpaper - arrows move - Enter set - Esc close (%u items)",
+        npool);
+    draw_text(wm, &pick_dc, draw_ui_font(wm), 8, 16, hdr,
+        (unsigned)strlen(hdr), BAR_DIM, cfg.bar_bg);
 
     for (unsigned i = first_row * cols;
         i < npool && i < (first_row + rows_vis) * cols; i++)
@@ -362,9 +367,9 @@ pick_button(wm_t *wm, int16_t ex, int16_t ey, uint8_t btn,
 static void
 pick_close(wm_t *wm)
 {
+    xcb_free_gc(wm->conn, pick_dc.gc);
     xcb_destroy_window(wm->conn, pick_win);
     pick_win = XCB_NONE;
-    (void)wm;
 }
 
 static bool
@@ -436,7 +441,7 @@ wallpaper_pick(wm_t *wm)
         XCB_WINDOW_CLASS_INPUT_OUTPUT, XCB_COPY_FROM_PARENT,
         XCB_CW_OVERRIDE_REDIRECT | XCB_CW_BACK_PIXEL |
             XCB_CW_EVENT_MASK,
-        (uint32_t[]){ 0x101018, 1,
+        (uint32_t[]){ cfg.bar_bg, 1,
             XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_KEY_PRESS |
                 XCB_EVENT_MASK_BUTTON_PRESS });
     draw_setup(wm, &pick_dc, pick_win);

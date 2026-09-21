@@ -6,7 +6,6 @@
 
 #include "../bar.h"
 #include "../barmod.h"
-#include "../draw.h"
 
 /* /sys/class/power_supply scan (§6.2): "{state} {cap}%". Lazy refresh
  * every 30 s; renders empty on machines without a battery. */
@@ -35,42 +34,17 @@ bat_read(char *out, size_t outsz)
     snprintf(out, outsz, "%s %s%%", state[0] ? state : "Bat", cap);
 }
 
-unsigned
+static unsigned
 batmod_render(wm_t *wm, monitor_t *mon, module_t *m, int x, bool draw)
 {
     static time_t last;
     static char text[32];
-    font_t *f = bar_font(wm, m);
 
     if (time(NULL) - last >= BAT_INTERVAL) {
         last = time(NULL);
         bat_read(text, sizeof(text));
     }
-    size_t len = strlen(text);
-
-    if (!len || !draw)
-        return len ? draw_text_w(wm, f, text, (unsigned)len) +
-                           2 * BAR_PAD
-                   : 0;
-    unsigned w = draw_text_w(wm, f, text, (unsigned)len) + 2 * BAR_PAD;
-
-    draw_text(wm, &mon->bar->draw, f, x + BAR_PAD,
-        bar_baseline(wm, mon, f), text, (unsigned)len,
-        bar_color(m, BAR_FG), BAR_BG);
-    return w;
+    return textmod_render(wm, mon, m, x, draw, text, strlen(text));
 }
 
-void
-batmod_click(wm_t *wm, monitor_t *mon, module_t *m, int mod_x, int px,
-    unsigned btn)
-{
-    (void)wm;
-    (void)mon;
-    (void)m;
-    (void)mod_x;
-    (void)px;
-    (void)btn;
-}
-
-const mod_reg_t batmod = { "battery", batmod_render,
-    batmod_click };
+const mod_reg_t batmod = { "battery", batmod_render, mod_noop_click };

@@ -42,9 +42,18 @@ main(int argc, char **argv)
     char line[1024];
     int o = 0;
 
-    for (int i = 1; i < argc && o < (int)sizeof(line) - 1; i++)
-        o += snprintf(line + o, (unsigned)(sizeof(line) - o), "%s%s",
+    for (int i = 1; i < argc; i++) {
+        int need = snprintf(line + o, sizeof(line) - (size_t)o, "%s%s",
             i > 1 ? " " : "", argv[i]);
+
+        if (need < 0)
+            break;
+        o += need;
+        if (o >= (int)sizeof(line) - 2) {
+            o = (int)sizeof(line) - 2;
+            break;
+        }
+    }
     line[o] = '\n';
     write(fd, line, (size_t)o + 1);
     shutdown(fd, SHUT_WR);

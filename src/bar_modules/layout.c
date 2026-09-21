@@ -4,16 +4,16 @@
 #include "../barmod.h"
 #include "../draw.h"
 #include "../layout.h"
+#include "../settings.h"
 #include "../workspace.h"
 
 /* Current layout glyph (SPEC §4.4); click cycles layouts. */
 
-unsigned
+static unsigned
 layoutmod_render(wm_t *wm, monitor_t *mon, module_t *m, int x, bool draw)
 {
     font_t *f = bar_font(wm, m);
-    workspace_t *ws = &workspaces[mon->ws_visible];
-    const char *sym = austere_layouts[ws->layout_idx].symbol;
+    const char *sym = austere_layouts[wm->layout_idx].symbol;
     size_t len = strlen(sym);
     unsigned w = draw_text_w(wm, f, sym, (unsigned)len) + 2 * BAR_PAD;
 
@@ -21,11 +21,11 @@ layoutmod_render(wm_t *wm, monitor_t *mon, module_t *m, int x, bool draw)
         return w;
     draw_text(wm, &mon->bar->draw, f, x + BAR_PAD,
         bar_baseline(wm, mon, f), sym, (unsigned)len,
-        bar_color(m, BAR_FG), BAR_BG);
+        bar_color(m, cfg.bar_fg), cfg.bar_bg);
     return w;
 }
 
-void
+static void
 layoutmod_click(wm_t *wm, monitor_t *mon, module_t *m, int mod_x,
     int px, unsigned btn)
 {

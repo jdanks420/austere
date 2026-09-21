@@ -8,6 +8,7 @@
 #include "bar.h"
 #include "client.h"
 #include "conf.h"
+#include "deco.h"
 #include "keys.h"
 #include "layout.h"
 #include "popup.h"
@@ -32,7 +33,11 @@ settings_defaults(settings_t *s)
     s->gap = 0;
     s->smart_gaps = false;
     s->corner_radius = 0;
-    s->font = NULL; /* draw.c falls back to embedded Agave */
+    s->font = NULL; /* draw.c resolves fontconfig patterns, default Agave */
+    s->deco = false;
+    s->deco_title_h = 20;
+    s->deco_border = 0x5f819d;
+    s->deco_unfocus_border = 0x444444;
 
     s->bar_bottom = false;
     s->time_format = xstrdup("%a %d %b %H:%M");
@@ -75,8 +80,6 @@ settings_defaults(settings_t *s)
     s->wp_setter = xstrdup("feh --bg-scale %s");
 }
 
-const char *wallpaper_current(void); /* wallpaper.c */
-
 unsigned
 launcher_module_find(const char *prefix)
 {
@@ -84,12 +87,6 @@ launcher_module_find(const char *prefix)
         if (!strcmp(cfg.mod_name[i], prefix))
             return i;
     return UINT_MAX;
-}
-
-const char *
-launcher_module_name(unsigned idx)
-{
-    return idx < cfg.nmodules ? cfg.mod_name[idx] : NULL;
 }
 
 void
@@ -132,10 +129,20 @@ settings_free_strings(settings_t *s)
     s->nwp_dirs = 0;
     s->autostart_run = NULL;
     s->nautostart_run = 0;
-    s->wp_setter = xstrdup("feh --bg-scale %s");
+    free(s->wp_setter);
+    s->wp_setter = NULL;
+    for (unsigned i = 0; i < s->nbar_left; i++)
+        free(s->bar_left[i]);
+    free(s->bar_left);
+    for (unsigned i = 0; i < s->nbar_center; i++)
+        free(s->bar_center[i]);
+    free(s->bar_center);
+    for (unsigned i = 0; i < s->nbar_right; i++)
+        free(s->bar_right[i]);
+    free(s->bar_right);
+    s->bar_left = s->bar_center = s->bar_right = NULL;
+    s->nbar_left = s->nbar_center = s->nbar_right = 0;
 }
-
-const char *wallpaper_current(void); /* wallpaper.c */
 
 /* Take ownership of src's heap strings and bind array contents. */
 void
@@ -144,6 +151,31 @@ settings_swap(settings_t *dst, settings_t *src)
     settings_free_strings(dst);
     *dst = *src;
     memset(src, 0, sizeof(*src));
+}
+
+/* Re-apply the WM state derived from appearance settings: client border
+ * width + focus colors, and decorator geometry. Shared by the settings
+ * menu (live apply) and config-file reload. */
+void
+settings_reapply_clients(wm_t *wm)
+{
+    for (client_t *c = wm->clients; c; c = c->next) {
+        if (c->deco) /* border lives on the deco wrapper, not the child */
+            continue;
+        xcb_configure_window(wm->conn, c->win,
+            XCB_CONFIG_WINDOW_BORDER_WIDTH,
+            (uint32_t[]){ cfg.border_width });
+        set_border(wm, c, wm->focused == c ? cfg.focus_color
+                                           : cfg.unfocus_color);
+    }
+    deco_reconfigure_all(wm);
+    for (client_t *c = wm->clients; c; c = c->next)
+        if (c->deco) {
+            c->deco->title_h = cfg.deco_title_h;
+            c->deco->btn_size = cfg.deco_title_h;
+            deco_shape(wm, c);
+            deco_draw(wm, c);
+        }
 }
 
 /* Transactional reload (§9.2): parse into scratch; any validation
@@ -178,14 +210,7 @@ settings_apply_file(wm_t *wm, const char *path, const char *ok_msg)
 
     ungrab_keys(wm);
     grab_keys(wm);
-
-    for (client_t *c = wm->clients; c; c = c->next) {
-        xcb_configure_window(wm->conn, c->win,
-            XCB_CONFIG_WINDOW_BORDER_WIDTH,
-            (uint32_t[]){ cfg.border_width });
-        set_border(wm, c, wm->focused == c ? cfg.focus_color
-                                           : cfg.unfocus_color);
-    }
+    settings_reapply_clients(wm);
 
     for (unsigned i = 0; i < WS_MAX; i++) {
         free(workspaces[i].name);
@@ -193,7 +218,17 @@ settings_apply_file(wm_t *wm, const char *path, const char *ok_msg)
             ? xstrdup(cfg.ws_names[i])
             : NULL;
     }
+    /* A swap can land mid-drag or after a client died with focus stale;
+     * cancel any stuck drag and re-pin input on the current view so the
+     * reload never leaves the keyboard/pointer hostage. */
+    wm->mouse.mode = DRAG_NONE;
+    wm->mouse.drag = NULL;
+    xcb_ungrab_pointer(wm->conn, XCB_CURRENT_TIME);
     bars_sync(wm);
     arrange(wm);
+    monitor_t *fm = focused_mon(wm);
+
+    if (fm && ws_shown(fm->ws_visible))
+        refocus_ws(wm, fm->ws_visible);
     popup_notify(wm, "%s", ok_msg);
 }

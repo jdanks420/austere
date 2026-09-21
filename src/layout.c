@@ -6,12 +6,13 @@
 #include "layout.h"
 #include "settings.h"
 #include "monitor.h"
+#include "menu.h"
 #include "util.h"
 
 const layout_t austere_layouts[] = {
-    { "tile", "[]=", tile_arrange },
-    { "monocle", "[ ]", monocle_arrange },
-    { "scroll", "><", scroll_arrange },
+    { "tile", "[]=", tile_arrange, false, true },
+    { "monocle", "[ ]", monocle_arrange, false, false },
+    { "float", "<>", float_arrange, true, false },
 };
 
 const unsigned n_austere_layouts =
@@ -28,22 +29,28 @@ visible_ws(wm_t *wm)
 void
 arrange(wm_t *wm)
 {
+    /* Layout mode is global: the same layout applies to every workspace
+     * (SPEC §4.2). Parameters like split_ratio/nmaster stay per-ws. */
+    const layout_t *lay = &austere_layouts[wm->layout_idx];
+
     for (monitor_t *m = wm->mons; m; m = m->next) {
         workspace_t *ws = &workspaces[m->ws_visible];
 
-        austere_layouts[ws->layout_idx].arrange(wm, m, ws);
+        lay->arrange(wm, m, ws);
     }
 
     /* Floaters must sit above tiled geometry so newly mapped clients
-     * don't bury them. */
+     * don't bury them. In a float layout there is no tiled geometry, so
+     * nothing to protect — focus() owns raising there; re-raising every
+     * client on every arrange would force a restack storm (flicker). */
     for (client_t *c = wm->clients; c; c = c->next) {
         if (c->floating && !c->scratch_hidden &&
             workspaces[c->ws].mon &&
             workspaces[c->ws].mon->ws_visible == c->ws)
-            xcb_configure_window(wm->conn, c->win,
-                XCB_CONFIG_WINDOW_STACK_MODE,
-                (uint32_t[]){ XCB_STACK_MODE_ABOVE });
+            raise_client(wm, c);
     }
+    if (menu_active())
+        menu_bump(wm);
 }
 
 const layout_t *
@@ -64,17 +71,17 @@ set_layout(wm_t *wm, const char *name)
         fprintf(stderr, "austere: unknown layout '%s'\n", name);
         return;
     }
-    visible_ws(wm)->layout_idx = (unsigned)(l - austere_layouts);
+    wm->layout_idx = (unsigned)(l - austere_layouts);
     arrange(wm);
+    bar_render_all(wm);
 }
 
 void
 cycle_layout(wm_t *wm)
 {
-    workspace_t *ws = visible_ws(wm);
-
-    ws->layout_idx = (ws->layout_idx + 1) % n_austere_layouts;
+    wm->layout_idx = (wm->layout_idx + 1) % n_austere_layouts;
     arrange(wm);
+    bar_render_all(wm);
 }
 
 void
@@ -115,33 +122,4 @@ toggle_float(wm_t *wm)
     arrange(wm);
 }
 
-/* Scroll layout panning (nwm-style): move the viewport by one column.
- * Clamping happens in scroll_arrange against the real column count. */
-void
-scroll_nudge(wm_t *wm, int dir)
-{
-    workspace_t *ws = visible_ws(wm);
 
-    if (austere_layouts[ws->layout_idx].arrange != scroll_arrange)
-        return;
-    monitor_t *m = focused_mon(wm);
-    Rect a = mon_workarea(m);
-    unsigned gap = cfg.gap;
-    unsigned aw = a.w > 2 * gap ? a.w - 2 * gap : a.w;
-
-    ws->scroll_off = (unsigned)((int)ws->scroll_off +
-        dir * (int)(aw + gap));
-    arrange(wm);
-}
-
-void
-scroll_left(wm_t *wm)
-{
-    scroll_nudge(wm, -1);
-}
-
-void
-scroll_right(wm_t *wm)
-{
-    scroll_nudge(wm, 1);
-}

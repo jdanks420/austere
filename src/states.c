@@ -1,6 +1,6 @@
 /* Config states: complete .toml configs living in
  * $XDG_CONFIG_HOME/austere/states/. The picker lists them; loading one
- * runs the same transactional swap as a hot-reload. */
+ * runs the same transactional swap as an explicit reload. */
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -87,15 +87,17 @@ states_boot_override(void)
     }
     fclose(f);
     name[strcspn(name, "\r\n")] = '\0';
-    if (!name_safe(name))
+    if (!name_safe(name)) {
+        fprintf(stderr, " unsafe\n");
         return NULL;
+    }
     states_dir(dir, sizeof(dir));
     if (snprintf(ret, sizeof(ret), "%s/%s.toml", dir, name) >=
         (int)sizeof(ret))
         return NULL;
-    if (stat(ret, &st) != 0 || !S_ISREG(st.st_mode))
-        return NULL;
-    return ret;
+    int ok = stat(ret, &st) == 0 && S_ISREG(st.st_mode);
+
+    return ok ? ret : NULL;
 }
 
 bool
@@ -103,13 +105,16 @@ states_load(wm_t *wm, const char *name)
 {
     char dir[512], path[640];
 
+    if (!name || !name_safe(name)) {
+        popup_notify(wm, "state not found: %s", name ? name : "");
+        return false;
+    }
     states_dir(dir, sizeof(dir));
     snprintf(path, sizeof(path), "%s/%s.toml", dir, name);
 
     struct stat st;
 
-    if (!name_safe(name) || stat(path, &st) != 0 ||
-        !S_ISREG(st.st_mode)) {
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
         popup_notify(wm, "state not found: %s", name);
         return false;
     }
@@ -161,14 +166,7 @@ menu_states_open(wm_t *wm)
         popup_notify(wm, "no states in %s", dir);
         return;
     }
-    for (unsigned a = 0; a + 1 < nstate_rows; a++)
-        for (unsigned b = a + 1; b < nstate_rows; b++)
-            if (strcasecmp(state_rows[a], state_rows[b]) > 0) {
-                char *t = state_rows[a];
-
-                state_rows[a] = state_rows[b];
-                state_rows[b] = t;
-            }
+    sort_strs(state_rows, nstate_rows, true);
 
     panel_def_t def = {
         .title = "config states", .prompt = "",

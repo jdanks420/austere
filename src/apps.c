@@ -21,7 +21,6 @@ static struct {
     unsigned cat; /* 0..3 = fixed buckets, 4 = other */
 } apps[APPS_MAX];
 static unsigned napps;
-static bool scanned;
 
 static const char *const CAT_NAMES[] = { "internet", "system",
     "creative", "media", "other" };
@@ -47,12 +46,6 @@ const char *
 app_name(unsigned i)
 {
     return i < napps ? apps[i].name : "";
-}
-
-const char *
-app_exec(unsigned i)
-{
-    return i < napps ? apps[i].exec : "";
 }
 
 unsigned
@@ -169,7 +162,6 @@ apps_rescan(void)
         }
         closedir(dp);
     }
-    scanned = true;
 }
 
 const char *

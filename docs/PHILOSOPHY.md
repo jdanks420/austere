@@ -1,7 +1,7 @@
 # Austere — Design Philosophy
 
 Normative. When SPEC.md is silent, this document decides. Order of
-authority: SPEC.md → this document → AGENTS.md tiebreakers.
+authority: SPEC.md → this document.
 
 ---
 
@@ -36,8 +36,10 @@ than purity of the *workflow*.
 2. **Two frontends, one backend.** The settings menu and `austere.conf` are
    equally complete views over the same `Settings` struct (SPEC §9.4).
    Neither is second-class; a setting missing from either frontend is a bug.
-3. **Dependencies are radioactive.** libxcb family only — with two named,
-   justified exceptions: `xcb-shape` (rounded corners) and `imlib2`
+3. **Dependencies are radioactive.** libxcb family only — with three named,
+   justified exceptions: `xcb-shape` (rounded corners), `fontconfig` +
+   `freetype` (text rasterization only; plain C, no Xlib/Xft, no cairo/
+   pango), and `imlib2`
    (wallpaper thumbnails only; already required by the mandated feh setter,
    build-omittable via `AUSTERE_NO_IMLIB2`). A feature needing anything
    else gets redesigned or dropped.
@@ -53,7 +55,7 @@ than purity of the *workflow*.
    parses no language and embeds no interpreter. Behavior extends across
    process boundaries (user scripts as bar modules) or compile boundaries
    (layouts, built-in C modules) — nothing in between.
-8. **Performance budgets are features.** <2 MB RSS, ~0% idle CPU. A
+8. **Performance budgets are features.** ≤ 4.5 MB PSS idle, ~0% idle CPU. A
    regression against budget is a bug, not a tradeoff.
 9. **Robust by default.** Malformed config, hostile clients, dead sockets —
    nothing takes down the running session (SPEC §10).
@@ -62,7 +64,7 @@ than purity of the *workflow*.
 
 | suckless position | austere position | reason |
 |---|---|---|
-| Compile-time `config.h` | Runtime conf + hot reload + menu | The recompile gate blocks new users and mid-session iteration |
+| Compile-time `config.h` | Runtime conf + config states + menu | The recompile gate blocks new users and mid-session iteration; states/`reload` swap config transactionally at runtime |
 | No GUI config ("learn C") | Native settings panel drawn with bar primitives | Accessibility without toolkits or deps |
 | Tags (multi-tag bitmasks) | i3-model workspaces | Matches the mental model most users already have |
 | No remote control on principle | Command socket over the action registry | Scriptability costs zero WM logic paths |
@@ -71,7 +73,7 @@ than purity of the *workflow*.
 | Compositing: out of scope, unaddressed | Explicit host-agnostic contract (SPEC §5.8): any user compositor or none | Users keep free choice of compositor/version; austere never fights it |
 | Xlib | libxcb | Lower latency, smaller footprint |
 
-Inherited without apology: single binary, bitmap fonts, low SLOC targets,
+Inherited without apology: single binary, fontconfig-resolved fonts, low SLOC targets,
 keyboard-first operation, flat event loop, patch-friendly structure.
 
 ## Tiebreakers (when SPEC and principles don't decide)
