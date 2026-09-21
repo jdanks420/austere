@@ -27,6 +27,8 @@ this project is experimental software still being worked on. please forgive me f
 <img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/2493f7e8-18a7-422c-b2a5-77dc5c23f705" />
 <img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/e9b3b432-ee75-49f2-b29c-40e95d26005f" />
 
+## tiling ofc
+<img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/f92aecca-beef-4abc-b610-53efd74e49be" />
 
 
 
