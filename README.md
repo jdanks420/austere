@@ -8,6 +8,8 @@ modular status bar, and runtime settings menu — in C11 against raw
 cairo, no pango — text via fontconfig + freetype, one thread, one
 connection, one `poll()` loop.
 
+this project is experimental software still being worked on. please forgive me for any goofy stuff :)
+
 ## app launcher
 <img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/30574b6e-af89-48c6-a394-2fe2082d8286" />
 
