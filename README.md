@@ -8,6 +8,78 @@ modular status bar, and runtime settings menu — in C11 against raw
 cairo, no pango — text via fontconfig + freetype, one thread, one
 connection, one `poll()` loop.
 
+## Installation
+
+### Dependencies
+
+| library | purpose | Debian / Ubuntu | Arch | Fedora |
+|---|---|---|---|---|
+| libxcb | X11 client library | `libxcb1-dev` | `libxcb` | `libxcb-devel` |
+| xcb-util-keysyms | keycode ↔ keysym tables | `libxcb-keysyms1-dev` | `xcb-util-keysyms` | `xcb-util-keysyms-devel` |
+| xcb-util-icccm | EWMH / ICCCM helpers | `libxcb-icccm4-dev` | `xcb-util-wm` | `xcb-util-wm-devel` |
+| xcb-randr | monitor hotplug & geometry | `libxcb-randr0-dev` | `libxcb` | `xcb-util-randr-devel` |
+| xcb-xtest | XTEST | `libxcb-xtest0-dev` | `libxcb` | `xcb-util-xtest-devel` |
+| xcb-shape | rounded corners | `libxcb-shape0-dev` | `libxcb` | `libxcb-devel` |
+| fontconfig | font matching | `libfontconfig1-dev` | `fontconfig` | `fontconfig-devel` |
+| freetype2 | text rasterization | `libfreetype6-dev` | `freetype2` | `freetype-devel` |
+| pkg-config | build | `pkg-config` | `pkgconf` | `pkgconf-pkg-config` |
+| imlib2 *(optional)* | wallpaper thumbnails | `libimlib2-dev` | `imlib2` | `imlib2-devel` |
+
+Package names vary by release — search your distribution for the xcb-util
+libraries if one is missing. Build with `AUSTERE_NO_IMLIB2=1` to omit the
+Imlib2 dependency entirely. The TOML parser ([tomlc17](3rdparty/)) is
+vendored and needs nothing extra.
+
+### Build
+
+```sh
+make            # cc -std=c11 -Wall -Wextra -Werror -pedantic
+```
+
+Wallpaper thumbnails require Imlib2 (default on). To build without it:
+
+```sh
+make AUSTERE_NO_IMLIB2=1
+```
+
+### Install
+
+```sh
+sudo make install            # PREFIX=/usr/local by default
+```
+
+Installs the `austere` binary, the `austere-cmd` CLI, and
+`contrib/austere.desktop` as a display-manager session, so `austere` shows
+up in the login screen's session list. Override the prefix or use
+`DESTDIR` for packaging:
+
+```sh
+make install PREFIX=/usr DESTDIR="$pkgdir"
+```
+
+To remove:
+
+```sh
+sudo make uninstall
+```
+
+### Start
+
+Pick **austere** as the session in your display manager, or start it
+manually:
+
+```sh
+exec austere
+```
+
+Swap it in over a running window manager without restarting X:
+
+```sh
+austere --replace
+```
+
+Other options: `--restart` (restart in place, restoring sessions).
+
 ## Features
 
 - **Layouts**: tile (master/stack; global mode, per-ws ratio/nmaster),
@@ -42,76 +114,6 @@ connection, one `poll()` loop.
 - **Text**: any fontconfig font pattern (`font = "Agave Nerd Font Mono:
   pixelsize=16"`), full UTF-8 + extended glyph table, 4-bit coverage
   AA rendering with run merging, supersampled regeneration pipeline
-
-## Dependencies
-
-| library | purpose | Debian / Ubuntu | Arch | Fedora |
-|---|---|---|---|---|
-| libxcb | X11 client library | `libxcb1-dev` | `libxcb` | `libxcb-devel` |
-| xcb-util-keysyms | keycode ↔ keysym tables | `libxcb-keysyms1-dev` | `xcb-util-keysyms` | `xcb-util-keysyms-devel` |
-| xcb-util-icccm | EWMH / ICCCM helpers | `libxcb-icccm4-dev` | `xcb-util-wm` | `xcb-util-wm-devel` |
-| xcb-randr | monitor hotplug & geometry | `libxcb-randr0-dev` | `libxcb` | `xcb-util-randr-devel` |
-| xcb-xtest | XTEST | `libxcb-xtest0-dev` | `libxcb` | `xcb-util-xtest-devel` |
-| xcb-shape | rounded corners | `libxcb-shape0-dev` | `libxcb` | `libxcb-devel` |
-| fontconfig | font matching | `libfontconfig1-dev` | `fontconfig` | `fontconfig-devel` |
-| freetype2 | text rasterization | `libfreetype6-dev` | `freetype2` | `freetype-devel` |
-| pkg-config | build | `pkg-config` | `pkgconf` | `pkgconf-pkg-config` |
-| imlib2 *(optional)* | wallpaper thumbnails | `libimlib2-dev` | `imlib2` | `imlib2-devel` |
-
-Package names vary by release — search your distribution for the xcb-util
-libraries if one is missing. Build with `AUSTERE_NO_IMLIB2=1` to omit the
-Imlib2 dependency entirely. The TOML parser ([tomlc17](3rdparty/)) is
-vendored and needs nothing extra.
-
-## Building
-
-```sh
-make            # cc -std=c11 -Wall -Wextra -Werror -pedantic
-```
-
-Wallpaper thumbnails require Imlib2 (default on). To build without it:
-
-```sh
-make AUSTERE_NO_IMLIB2=1
-```
-
-## Installing
-
-```sh
-sudo make install            # PREFIX=/usr/local by default
-```
-
-Installs the `austere` binary, the `austere-cmd` CLI, and
-`contrib/austere.desktop` as a display-manager session, so `austere` shows
-up in the login screen's session list. Override the prefix or use
-`DESTDIR` for packaging:
-
-```sh
-make install PREFIX=/usr DESTDIR="$pkgdir"
-```
-
-To remove:
-
-```sh
-sudo make uninstall
-```
-
-## Starting austere
-
-Install as a DM session and pick **austere** at login, or start it
-manually:
-
-```sh
-exec austere
-```
-
-Swap it in over a running window manager without restarting X:
-
-```sh
-austere --replace
-```
-
-Other options: `--restart` (restart in place, restoring sessions).
 
 ## Usage
 
