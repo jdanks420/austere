@@ -3,10 +3,7 @@
 <p align="center"><img src="logo_white.svg" alt="austere" width="96"></p>
 
 A low-spec X11 desktop shell: tiling/stacking/floating window manager,
-modular status bar, and runtime settings menu — in C11 against raw
-[libxcb](https://cgit.freedesktop.org/xcb/libxcb). No toolkits, no
-cairo, no pango — text via fontconfig + freetype, one thread, one
-connection, one `poll()` loop.
+modular status bar, app launcher, config switcher, window switcher and wallpaper picker.
 
 this project is experimental software still being worked on. please forgive me for any goofy stuff :)
 
