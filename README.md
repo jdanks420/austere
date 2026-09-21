@@ -8,15 +8,20 @@ modular status bar, and runtime settings menu — in C11 against raw
 cairo, no pango — text via fontconfig + freetype, one thread, one
 connection, one `poll()` loop.
 
-# app launcher
+## app launcher
 <img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/30574b6e-af89-48c6-a394-2fe2082d8286" />
-# config/layout switcher (change your theme and layout on the fly with super+`)
+
+
+## config/layout switcher (change your theme and layout on the fly with super+`)
 <img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/7eca7184-c4b0-4813-a69f-70f715412129" />
-# preview style window switcher similar to openbox/labwc
+
+## preview style window switcher similar to openbox/labwc
 <img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/450e16e6-c2be-4769-b6dc-7d1c255ccc76" />
-# wallpaper picker
+
+## wallpaper picker
 <img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/a8103b4e-6052-43db-927c-11fbfa781e25" />
-# themes (heres a couple. all major colorschemes to be added in the future or add them yourself! :) )
+
+## themes (heres a couple. all major colorschemes to be added in the future or add them yourself! :) )
 <img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/2493f7e8-18a7-422c-b2a5-77dc5c23f705" />
 <img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/e9b3b432-ee75-49f2-b29c-40e95d26005f" />
 
