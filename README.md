@@ -3,7 +3,7 @@
 <p align="center"><img src="logo_white.svg" alt="austere" width="96"></p>
 
 A low-spec X11 desktop shell: tiling/stacking/floating window manager,
-modular status bar, app launcher, config switcher, window switcher and wallpaper picker.
+modular status bar, app launcher, start menu, config switcher, window switcher and wallpaper picker.
 
 this project is experimental software still being worked on. please forgive me for any goofy stuff :)
 
