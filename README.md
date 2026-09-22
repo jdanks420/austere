@@ -212,23 +212,6 @@ setter_command = "feh --bg-scale %s"
 dirs = ["~/Pictures/wallpapers"]
 ```
 
-## Color themes
-
-A bundled collection of common colorschemes ships in [`states/`](states/) —
-each is a complete config state (factory keybinds and defaults; only the
-palette changes). Install them beside your config so the `super+grave`
-picker lists them:
-
-```sh
-make install-states   # copies to /usr/local/share/austere/states
-cp /usr/local/share/austere/states/* ~/.config/austere/states/
-```
-
-Every theme uses the current factory keybinds (volume keys, `super+f`,
-`super+d`, …) and only documented options, so each is a valid, swappable
-state. `tools/genstates.py` regenerates the set from the canonical
-palettes — add a scheme by extending its `THEMES` table and rerunning.
-
 ## Command socket
 
 When `[general] socket = true` (the default), the running session exposes
@@ -250,8 +233,6 @@ src/              core WM (wm, events, layout, ewmh, socket, panels…)
 src/layouts/      one file per layout
 src/bar_modules/  one file per built-in status module
 contrib/          austere-cmd CLI + display-manager session entry
-states/           bundled colorscheme config states
-tools/            genstates.py theme generator
 3rdparty/         vendored tomlc17 (TOML parser)
 docs/             SPEC.md, PHILOSOPHY.md
 ```
