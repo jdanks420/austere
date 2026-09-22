@@ -116,4 +116,4 @@ dirs = []
 setter_command = "feh --bg-scale %s"
 
 [autostart]
-run = []
+run = ["mate-polkit"]

@@ -172,7 +172,7 @@ dirs = []
 setter_command = "feh --bg-scale %s"
 
 [autostart]
-run = []
+run = ["mate-polkit"]
 """
     os.makedirs(outdir, exist_ok=True)
     path = os.path.join(outdir, f"{stem}.toml")
