@@ -1,0 +1,119 @@
+# austere configuration
+# tokyo-night-storm.toml: Tokyo Night Storm.
+
+[general]
+terminal = "kitty"
+socket = true
+
+[appearance]
+border_width = 2
+focus_color = "#7aa2f7"
+unfocus_color = "#3b4261"
+urgent_color = "#f7768e"
+gap = 0
+smart_gaps = false
+corner_radius = 0
+font = "Agave Nerd Font Mono:pixelsize=16"
+
+[deco]
+deco = false
+deco_title_h = 20
+deco_border = "#3b4261"
+deco_unfocus_border = "#1a1b26"
+
+[bar]
+position = "top"
+time_format = "%a %d %b %H:%M"
+bar_bg = "#24283b"
+bar_fg = "#c0caf5"
+bar_gap = 0
+modules_left = ["workspaces", "layout"]
+modules_center = ["title"]
+modules_right = ["cpu", "ram", "battery", "volume", "clock"]
+
+[behavior]
+focus_follows_mouse = true
+raise_on_click = true
+snap_distance = 12
+popup_timeout = 5
+swallowing = false
+
+[layouts]
+default = "tile"
+nmaster = 1
+split_ratio = 0.50
+ratio_step = 0.05
+
+[workspaces]
+names = ["", "", "", "", "", "", "", "", ""]
+
+[keys]
+bind = [
+    "super+m quit",
+    "super+Return spawn_terminal",
+    "alt+q close_focused",
+    "super+s cycle_layout",
+    "super+f toggle_fullscreen",
+    "super+h ratio_shrink",
+    "super+l ratio_grow",
+    "alt+Tab show_switcher",
+    "alt+shift+Tab show_switcher",
+    "super+w show_switcher",
+    "super+Tab mru_step",
+    "alt+space show_launcher",
+    "super+grave menu_states",
+    "super+p scratch_toggle",
+    "super+shift+s scratch_mark",
+    "super+g toggle_float",
+    "super+ctrl+m ws_to_monitor",
+    "super+d menu_apps",
+    "super+e menu_settings",
+    "super+Escape reload",
+    "super+shift+r restart",
+    "alt+r wallpaper_random",
+    "alt+w wallpaper_pick",
+    "alt+Left focus_left",
+    "alt+Right focus_right",
+    "alt+Up focus_up",
+    "alt+Down focus_down",
+    "XF86AudioRaiseVolume volume_raise",
+    "XF86AudioLowerVolume volume_lower",
+    "XF86AudioMute volume_mute",
+    "super+1 view_ws 0",
+    "super+shift+1 send_ws 0",
+    "super+2 view_ws 1",
+    "super+shift+2 send_ws 1",
+    "super+3 view_ws 2",
+    "super+shift+3 send_ws 2",
+    "super+4 view_ws 3",
+    "super+shift+4 send_ws 3",
+    "super+5 view_ws 4",
+    "super+shift+5 send_ws 4",
+    "super+6 view_ws 5",
+    "super+shift+6 send_ws 5",
+    "super+7 view_ws 6",
+    "super+shift+7 send_ws 6",
+    "super+8 view_ws 7",
+    "super+shift+8 send_ws 7",
+    "super+9 view_ws 8",
+    "super+shift+9 send_ws 8",
+]
+
+[mouse]
+modifier = "super"
+move_button = 1
+resize_button = 3
+
+[switcher]
+scope = "all"
+
+[launcher]
+scan_path = true
+history_size = 20
+
+[wallpaper]
+dirs = []
+setter_command = "feh --bg-scale %s"
+
+[autostart]
+run = []

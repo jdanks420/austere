@@ -16,7 +16,7 @@ WPLIBS  = -lImlib2
 endif
 BIN     = austere
 
-.PHONY: clean install uninstall
+.PHONY: clean install uninstall install-states
 
 $(BIN): $(OBJS) Makefile
 	$(CC) $(CFLAGS) $(WPFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(WPLIBS)
@@ -47,3 +47,10 @@ uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/$(BIN)
 	rm -f $(DESTDIR)$(PREFIX)/bin/austere-cmd
 	rm -f $(DESTDIR)$(SESSIONDIR)/austere.desktop
+
+STATESDIR ?= $(PREFIX)/share/austere/states
+
+.PHONY: install-states
+install-states:
+	install -dm755 $(DESTDIR)$(STATESDIR)
+	install -m644 states/*.toml $(DESTDIR)$(STATESDIR)
