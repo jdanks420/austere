@@ -489,6 +489,8 @@ conf_load(const char *path, settings_t *s, bool strict)
 
         get_enum(sw, "scope", scopes, &si, &bad, strict);
         s->switcher_monitor_scope = si == 1;
+        get_bool(sw, "live_preview", &s->switcher_live_preview, &bad,
+            strict);
     }
     if (lnch.type == TOML_TABLE) {
         get_bool(lnch, "scan_path", &s->launcher_scan_path, &bad,
@@ -737,8 +739,10 @@ conf_write(const char *path, const settings_t *s)
                 action_name(b->action),
                 i + 1 < s->nbinds ? "," : "");
     }
-    fprintf(f, "]\n\n[switcher]\nscope = \"%s\"\n\n",
-        s->switcher_monitor_scope ? "monitor" : "all");
+    fprintf(f, "]\n\n[switcher]\nscope = \"%s\"\n"
+        "live_preview = %s\n\n",
+        s->switcher_monitor_scope ? "monitor" : "all",
+        s->switcher_live_preview ? "true" : "false");
 
     fprintf(f,
         "[launcher]\nscan_path = %s\nhistory_size = %u\n",

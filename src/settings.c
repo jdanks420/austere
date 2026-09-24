@@ -63,6 +63,7 @@ settings_defaults(settings_t *s)
     s->resize_button = 3;
 
     s->switcher_monitor_scope = false;
+    s->switcher_live_preview = true;
 
     s->launcher_scan_path = true;
     s->launcher_custom_dir = NULL;

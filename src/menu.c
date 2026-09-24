@@ -1546,8 +1546,15 @@ menu_key_release(wm_t *wm, xcb_key_release_event_t *ev)
         menu_pop_overlay(wm);
         return;
     }
-    if (panel_mode && pdef.hold_alt)
-        panel_finish(wm, false);
+    if (panel_mode && pdef.hold_alt) {
+        /* Alt release closes a hold-alt panel and lands the pick. Live
+         * preview only focuses rows already on screen (a row on another
+         * workspace is highlighted but never previewed), so the enter
+         * handler must always run: for a previewed row it is a no-op
+         * re-focus, for a cross-workspace row it performs the single
+         * workspace-switch jump. */
+        panel_finish(wm, pdef.on_enter != NULL);
+    }
 }
 
 void

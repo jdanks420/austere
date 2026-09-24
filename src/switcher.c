@@ -79,7 +79,29 @@ switcher_switch_to(wm_t *wm, const char *row)
 static void
 switcher_preview(wm_t *wm, const char *row)
 {
-    switcher_switch_to(wm, row);
+    if (!row)
+        return;
+    monitor_t *m = focused_mon(wm);
+
+    for (unsigned i = 0; i < sctx.n; i++) {
+        if (strcmp(sctx.labels[i], row) != 0)
+            continue;
+        client_t *c = find_client(wm, sctx.wins[i]);
+
+        if (!c || c->scratch_hidden)
+            break;
+        /* Live preview must not flip the workspace (or monitor) view
+         * on every keystroke: jumping to a row on another workspace
+         * re-maps and re-tiles the whole screen per press, and cycling
+         * back flips again — wall-to-wall damage that reads as flicker
+         * under a compositor. Preview only windows already on this
+         * monitor's visible workspace; other rows are highlighted and
+         * jumped to once, via switcher_enter on Alt release / Return. */
+        if (workspaces[c->ws].mon != m || !ws_shown(c->ws))
+            break;
+        focus(wm, c);
+        break;
+    }
 }
 
 static bool
@@ -155,7 +177,13 @@ switcher_panel_open(wm_t *wm)
         .hold_alt = true,
         .init_sel = 1, /* open already pointed at the next MRU window */
         .on_enter = switcher_enter,
-        .on_preview = switcher_preview,
+        /* live preview: focus+raise the target as the selection moves.
+         * With a full-workarea layout (monocle/float) this swaps the
+         * whole screen — and re-raises every client — on each keypress,
+         * which under a wall-to-wall compositor reads as flicker. Off,
+         * the panel just lists (no per-key press swap); the pick still
+         * lands via on_enter on Alt release / Return. */
+        .on_preview = cfg.switcher_live_preview ? switcher_preview : NULL,
         .on_close = switcher_close,
     };
 

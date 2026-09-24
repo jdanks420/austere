@@ -90,6 +90,7 @@ typedef struct {
 
     /* [switcher] */
     bool switcher_monitor_scope; /* all workspaces when false */
+    bool switcher_live_preview;  /* alt+Tab swaps focus as the selection moves */
 
     /* [launcher] */
     bool launcher_scan_path;
