@@ -1122,6 +1122,14 @@ menu_active(void)
     return is_open || overlay_active;
 }
 
+/* The topmost WM-owned window (panel or overlay), for stacking clients
+ * beneath it. XCB_NONE when input is not grabbed. */
+xcb_window_t
+menu_top_window(void)
+{
+    return overlay_active ? overlay.win : is_open ? win : XCB_NONE;
+}
+
 /* A focus change or floater re-raise while a panel is open must not
  * bury it (launcher/settings have no preview to re-raise behind). */
 void

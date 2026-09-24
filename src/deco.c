@@ -57,44 +57,49 @@ find_argb_visual(xcb_screen_t *screen)
     return NULL;
 }
 
-/* Create the wrapper on the chosen depth/visual. Transparent wrappers
- * (ARGB, compositor present) carry per-pixel alpha so picom fades only
- * the title strip; opaque ones (root visual, no compositor) keep the
- * wrapper background None so only the painted strip shows, with the
- * root background underneath the client area. The client is a child
- * reparented below the strip, so its own content keeps alpha untouched
- * in both modes. Value lists are ordered by ascending mask-bit
- * significance (BACK_* < OVERRIDE_REDIRECT < EVENT_MASK < COLORMAP). */
-static void
+/* Create the title-bar window. The ARGB variant is tried first so a
+ * compositor can fade the strip; servers exist that advertise 32-bit
+ * visuals and still refuse depth-32 windows (BadMatch), so the request
+ * is checked and we fall back to the opaque root-visual surface instead
+ * of leaving a window that nothing can ever draw to. False only when
+ * even the opaque window is refused. */
+static bool
 deco_create_window(wm_t *wm, deco_t *d)
 {
     uint16_t cls = XCB_WINDOW_CLASS_INPUT_OUTPUT;
     uint32_t mask = XCB_CW_OVERRIDE_REDIRECT | XCB_CW_EVENT_MASK;
+    uint32_t events = XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_BUTTON_PRESS |
+        XCB_EVENT_MASK_BUTTON_RELEASE | XCB_EVENT_MASK_ENTER_WINDOW |
+        XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY;
+    xcb_void_cookie_t ck;
 
-    if (!d->transparent) {
-        uint32_t vals[2] = { 1,
-            XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_BUTTON_PRESS |
-                XCB_EVENT_MASK_BUTTON_RELEASE | XCB_EVENT_MASK_ENTER_WINDOW |
-                XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY };
-
-        xcb_create_window(wm->conn, wm->scr->root_depth, d->win,
-            wm->scr->root, d->win_x, d->win_y, d->win_w, d->win_h, 0,
-            cls, wm->scr->root_visual, mask, vals);
-    } else {
+    if (d->transparent) {
+        /* value lists follow ascending mask-bit significance:
+         * BACK_PIXMAP < OVERRIDE_REDIRECT < EVENT_MASK < COLORMAP */
         mask |= XCB_CW_BACK_PIXMAP | XCB_CW_COLORMAP;
-        uint32_t vals[4] = { XCB_BACK_PIXMAP_NONE, 1,
-            XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_BUTTON_PRESS |
-                XCB_EVENT_MASK_BUTTON_RELEASE | XCB_EVENT_MASK_ENTER_WINDOW |
-                XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY,
-            d->cmap };
+        uint32_t vals[4] = { XCB_BACK_PIXMAP_NONE, 1, events, d->cmap };
 
-        xcb_create_window(wm->conn, wm->deco_argb_depth, d->win,
-            wm->scr->root, d->win_x, d->win_y, d->win_w, d->win_h, 0,
-            cls, wm->deco_argb_visual, mask, vals);
+        ck = xcb_create_window_checked(wm->conn, wm->deco_argb_depth,
+            d->win, wm->scr->root, (int16_t)d->win_x, (int16_t)d->win_y,
+            (uint16_t)d->win_w, (uint16_t)d->win_h, 0, cls,
+            wm->deco_argb_visual, mask, vals);
+    } else {
+        uint32_t vals[2] = { 1, events };
+
+        ck = xcb_create_window_checked(wm->conn, wm->scr->root_depth,
+            d->win, wm->scr->root, (int16_t)d->win_x, (int16_t)d->win_y,
+            (uint16_t)d->win_w, (uint16_t)d->win_h, 0, cls,
+            wm->scr->root_visual, mask, vals);
     }
+    xcb_generic_error_t *e = xcb_request_check(wm->conn, ck);
+
+    if (!e)
+        return true;
+    free(e);
+    return false;
 }
 
-/* Gate ARGB wrappers on a compositor actually owning _NET_WM_CM_S<n>:
+/* Gate ARGB title bars on a compositor actually owning _NET_WM_CM_S<n>:
  * only then do alpha pixels get blended. On bare servers (no compositor)
  * the opaque root-visual path is used and no 32-bit window is ever
  * attempted, so the broken-server cases can't occur. */
@@ -125,51 +130,84 @@ deco_init(wm_t *wm)
     wm->deco_argb_visual = wm->deco_argb ? vis->visual_id : 0;
 }
 
-/* Reparent the client into an override-redirect wrapper. ARGB wrappers
- * (compositor present) draw a translucent strip; root-visual wrappers
- * draw an opaque strip. Either way the client keeps its own opaque
- * content below the strip, and the wrapper background stays None. */
+/* A strip is only mapped while its client is actually on screen:
+ * fullscreen owns the whole output, and minimized / scratch-hidden
+ * clients are unmapped or parked. Mapping anyway is what leaves a stray
+ * title bar painted over a fullscreen window when a config reload turns
+ * decorations back on. */
+static bool
+deco_visible(const client_t *c)
+{
+    return !c->fullscreen && !c->minimized && !c->scratch_hidden;
+}
+
+/* Strip geometry: the bar sits directly on top of the client area,
+ * clamped to the top of the client's own monitor so a window pulled
+ * against the bar never rides underneath it. */
+static void
+deco_place(wm_t *wm, client_t *c, deco_t *d)
+{
+    monitor_t *m = workspaces[c->ws].mon;
+
+    if (!m)
+        m = focused_mon(wm);
+    int min_y = m ? m->geom.y : 0;
+
+    d->win_w = c->w;
+    d->win_h = d->title_h;
+    d->win_x = c->x;
+    d->win_y = c->y - (int)d->title_h;
+    if (d->win_y < min_y)
+        d->win_y = min_y;
+}
+
+/* Add a standalone title bar above a managed client. The client itself
+ * stays a direct child of the root: it is never reparented and never
+ * covered by decoration, so a transparent application (an ARGB terminal,
+ * a GTK client) keeps compositing straight against the desktop. Only
+ * the strip carries per-pixel alpha. */
 void
 deco_create(wm_t *wm, client_t *c)
 {
     if (c->deco)
         return;
     deco_t *d = xmalloc(sizeof(*d));
-    unsigned th = cfg.deco_title_h;
 
     memset(d, 0, sizeof(*d));
-    d->title_h = th;
-    d->btn_size = th;
+    d->title_h = cfg.deco_title_h;
+    d->btn_size = d->title_h;
     d->win = xcb_generate_id(wm->conn);
-    monitor_t *m = focused_mon(wm);
-    int min_y = m ? m->geom.y : 0;
-
-    d->win_x = c->x;
-    d->win_y = c->y - (int)th;
-    if (d->win_y < min_y)
-        d->win_y = min_y;
-    d->win_w = c->w;
-    d->win_h = c->h + th;
+    deco_place(wm, c, d);
 
     d->transparent = wm->deco_argb;
     if (d->transparent) {
         d->cmap = xcb_generate_id(wm->conn);
         xcb_create_colormap(wm->conn, XCB_COLORMAP_ALLOC_NONE, d->cmap,
             wm->scr->root, wm->deco_argb_visual);
+        if (!deco_create_window(wm, d)) {
+            /* server refused depth 32: keep the strip, drop the alpha */
+            xcb_free_colormap(wm->conn, d->cmap);
+            d->cmap = XCB_NONE;
+            d->transparent = false;
+            if (!deco_create_window(wm, d)) {
+                free(d);
+                return;
+            }
+        }
+    } else if (!deco_create_window(wm, d)) {
+        free(d);
+        return;
     }
-    deco_create_window(wm, d);
-
     draw_setup(wm, &d->draw, d->win);
 
-    /* Client fills the wrapper below the title bar, borderless: the
-     * wrapper now owns decoration and geometry. */
-    xcb_reparent_window(wm->conn, c->win, d->win, 0, (int)th);
+    /* The strip replaces the frame: no server border on the client. */
     xcb_configure_window(wm->conn, c->win, XCB_CONFIG_WINDOW_BORDER_WIDTH,
         (uint32_t[]){ 0 });
 
     c->deco = d;
     mouse_grab_client(wm, d->win);
-    xcb_map_window(wm->conn, d->win);
+    if (deco_visible(c))
+        xcb_map_window(wm->conn, d->win);
     deco_shape(wm, c);
     deco_draw(wm, c);
 }
@@ -182,9 +220,7 @@ deco_destroy(wm_t *wm, client_t *c)
     if (!d)
         return;
     c->deco = NULL;
-    /* Restore the client to the root, non-override-managed, with the
-     * real border width. */
-    xcb_reparent_window(wm->conn, c->win, wm->scr->root, c->x, c->y);
+    /* Restore the real border width; the client never left the root. */
     xcb_configure_window(wm->conn, c->win, XCB_CONFIG_WINDOW_BORDER_WIDTH,
         (uint32_t[]){ cfg.border_width });
     deco_cleanup(wm, d);
@@ -231,11 +267,11 @@ deco_draw_title(wm_t *wm, client_t *c)
      * the same bar colors on every window. Focus shows only in the 1px
      * border, so nothing flips color as windows gain/lose focus. The
      * alpha byte rides on every strip pixel so a compositor fades the
-     * title bar without touching the client's own content. */
+     * title bar without touching the client behind it. */
     draw_rect(wm, &d->draw, 0, 0, d->win_w, d->title_h,
         cfg.bar_bg | a);
 
-    /* Border frame around the title bar only (not the client area). */
+    /* Border frame around the strip. */
     uint32_t border = (focused ? cfg.deco_border
                                : cfg.deco_unfocus_border) | a;
 
@@ -319,12 +355,11 @@ deco_shape(wm_t *wm, client_t *c)
         return;
     }
     shape_window(wm, d->win, d->win_w, d->win_h, radius);
-    client_shape(wm, c, radius);
 }
 
-/* Commit wrapper + client geometry from the client-area rect stored in
- * c->x/y/w/h by apply_geom. Fullscreen hides the wrapper and places the
- * borderless client over the whole monitor. */
+/* Keep the strip glued to the client-area rect stored in c->x/y/w/h by
+ * apply_geom. Fullscreen owns the whole output, so the strip unmaps and
+ * the borderless client covers the monitor. */
 void
 deco_update(wm_t *wm, client_t *c)
 {
@@ -332,36 +367,11 @@ deco_update(wm_t *wm, client_t *c)
 
     if (!d)
         return;
-    if (c->fullscreen) {
-        /* Fullscreen owns the whole output: wrapper and client both fill
-         * it, no strip drawn — the opaque client covers the alpha'd
-         * wrapper surface entirely. */
-        d->win_x = c->x;
-        d->win_y = c->y;
-        d->win_w = c->w;
-        d->win_h = c->h;
-        xcb_configure_window(wm->conn, d->win,
-            XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
-                XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
-            (uint32_t[]){ (uint32_t)d->win_x, (uint32_t)d->win_y,
-                d->win_w, d->win_h });
-        xcb_configure_window(wm->conn, c->win,
-            XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
-                XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
-            (uint32_t[]){ 0, 0, c->w, c->h });
-        xcb_map_window(wm->conn, d->win);
-        deco_shape(wm, c);
+    if (!deco_visible(c)) {
+        xcb_unmap_window(wm->conn, d->win);
         return;
     }
-    monitor_t *m = focused_mon(wm);
-    int min_y = m ? m->geom.y : 0;
-
-    d->win_x = c->x;
-    d->win_y = c->y - (int)d->title_h;
-    if (d->win_y < min_y)
-        d->win_y = min_y;
-    d->win_w = c->w;
-    d->win_h = c->h + d->title_h;
+    deco_place(wm, c, d);
     uint32_t vals[4] = { (uint32_t)d->win_x, (uint32_t)d->win_y,
         d->win_w, d->win_h };
 
@@ -369,11 +379,6 @@ deco_update(wm_t *wm, client_t *c)
         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
             XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
         vals);
-    /* Client child fills the wrapper below the title bar. */
-    xcb_configure_window(wm->conn, c->win,
-        XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
-            XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
-        (uint32_t[]){ 0, (uint32_t)d->title_h, c->w, c->h });
     xcb_map_window(wm->conn, d->win);
     deco_shape(wm, c);
     deco_draw(wm, c);
@@ -398,8 +403,13 @@ deco_toggle_maximize(wm_t *wm, client_t *c)
         d->prev_floating = c->floating;
         c->floating = true;
         Rect wa = mon_workarea(m);
+        unsigned th = d->title_h;
 
-        apply_geom(wm, c, wa.x, wa.y, (unsigned)wa.w, (unsigned)wa.h);
+        /* Reserve the strip's own height, exactly as the tiled layouts
+         * do: the title bar then lands inside the work area instead of
+         * riding over the bar. */
+        apply_geom(wm, c, wa.x, wa.y + (int)th, (unsigned)wa.w,
+            (unsigned)wa.h > th ? (unsigned)wa.h - th : 1);
         d->maximized = true;
     } else {
         d->maximized = false;
@@ -410,8 +420,9 @@ deco_toggle_maximize(wm_t *wm, client_t *c)
     focus(wm, c);
 }
 
-/* Hide a decorated window by unmapping its wrapper. Tracked via
- * c->minimized so the workspace title can hint at hidden clients. */
+/* Hide a decorated window by unmapping both the strip and the client.
+ * Tracked via c->minimized so the workspace title can hint at hidden
+ * clients. */
 void
 deco_minimize(wm_t *wm, client_t *c)
 {
@@ -425,6 +436,7 @@ deco_minimize(wm_t *wm, client_t *c)
     d->orig_h = c->h;
     c->minimized = true;
     xcb_unmap_window(wm->conn, d->win);
+    xcb_unmap_window(wm->conn, c->win);
     if (wm->focused == c) {
         monitor_t *m = workspaces[c->ws].mon;
 
@@ -455,14 +467,15 @@ deco_restore_minimized(wm_t *wm)
             apply_geom(wm, c, d->orig_x, d->orig_y, d->orig_w,
                 d->orig_h);
         apply_geom(wm, c, c->x, c->y, c->w, c->h);
-        xcb_map_window(wm->conn, c->deco->win);
+        xcb_map_window(wm->conn, d->win);
+        xcb_map_window(wm->conn, c->win);
         arrange(wm);
         focus(wm, c);
         return;
     }
 }
 
-/* Route clicks on a decorator wrapper. Returns true if consumed. */
+/* Route clicks on a title bar. Returns true if consumed. */
 bool
 deco_button_hit(wm_t *wm, xcb_button_press_event_t *ev, unsigned btn)
 {
@@ -482,7 +495,7 @@ deco_button_hit(wm_t *wm, xcb_button_press_event_t *ev, unsigned btn)
                 x < d->close_x + (int)d->btn_size) {
                 client_close(wm, c);
                 /* ASYNC drops the frozen press. Replaying it would
-                 * redeliver into the wrapper's own BUTTON_PRESS mask
+                 * redeliver into the strip's own BUTTON_PRESS mask
                  * and fire the action twice. */
                 xcb_allow_events(wm->conn, XCB_ALLOW_ASYNC_POINTER,
                     ev->time);
@@ -499,7 +512,7 @@ deco_button_hit(wm_t *wm, xcb_button_press_event_t *ev, unsigned btn)
             } else {
                 focus(wm, c);
                 move_drag_begin(wm, c, ev);
-                /* Button1 on the wrapper is a SYNC grab: release the
+                /* Button1 on the strip is a SYNC grab: release the
                  * freeze AND hand pointer control to our active grab so
                  * xcb_grab_pointer (in begin_drag) receives motion. */
                 xcb_allow_events(wm->conn, XCB_ALLOW_ASYNC_POINTER,

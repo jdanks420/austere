@@ -57,28 +57,6 @@ client_park(wm_t *wm, client_t *c, bool hide)
     if (!m)
         return;
     deco_t *d = c->deco;
-
-    if (d) {
-        /* The wrapper owns the screen geometry; parking the reparented
-         * child instead would clip it inside the unmoved frame, leaving
-         * a blank bar_bg box on screen (SPEC §4.4: the wrapper is the
-         * positioning surface). */
-        if (hide) {
-            uint32_t vals[2] = {
-                (uint32_t)m->geom.x + m->geom.w + 64,
-                (uint32_t)m->geom.y + m->geom.h + 64,
-            };
-
-            xcb_configure_window(wm->conn, d->win,
-                XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, vals);
-            return;
-        }
-        uint32_t vals[2] = { (uint32_t)d->win_x, (uint32_t)d->win_y };
-
-        xcb_configure_window(wm->conn, d->win,
-            XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, vals);
-        return;
-    }
     int px = c->x, py = c->y;
 
     if (hide) {
@@ -89,6 +67,16 @@ client_park(wm_t *wm, client_t *c, bool hide)
 
     xcb_configure_window(wm->conn, c->win,
         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, vals);
+    if (d) {
+        /* The title bar is a standalone window, not a frame around the
+         * client, so it has to travel with it: parked while the
+         * workspace is hidden, back in place when it returns. */
+        uint32_t dvals[2] = { (uint32_t)(hide ? px : d->win_x),
+            (uint32_t)(hide ? py : d->win_y) };
+
+        xcb_configure_window(wm->conn, d->win,
+            XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, dvals);
+    }
 }
 
 static void

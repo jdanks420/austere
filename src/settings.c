@@ -161,7 +161,7 @@ void
 settings_reapply_clients(wm_t *wm)
 {
     for (client_t *c = wm->clients; c; c = c->next) {
-        if (c->deco) /* border lives on the deco wrapper, not the child */
+        if (c->deco) /* the strip replaces the frame: client border stays 0 */
             continue;
         xcb_configure_window(wm->conn, c->win,
             XCB_CONFIG_WINDOW_BORDER_WIDTH,
@@ -174,9 +174,23 @@ settings_reapply_clients(wm_t *wm)
         if (c->deco) {
             c->deco->title_h = cfg.deco_title_h;
             c->deco->btn_size = cfg.deco_title_h;
-            deco_shape(wm, c);
-            deco_draw(wm, c);
+            /* deco_update resizes and repositions the strip itself, then
+             * reshapes and repaints it — the window is its own surface
+             * now, not a frame around the client. */
+            deco_update(wm, c);
         }
+}
+
+/* The file the running config came from: a state (picked from the menu
+ * or restored at boot) or austere.conf. Reload re-reads THIS file, not
+ * blindly austere.conf — otherwise a session started from a state would
+ * silently snap back to whatever austere.conf happens to hold. */
+static char active_conf[512];
+
+void
+settings_set_active_conf(const char *path)
+{
+    snprintf(active_conf, sizeof(active_conf), "%s", path ? path : "");
 }
 
 /* Transactional reload (§9.2): parse into scratch; any validation

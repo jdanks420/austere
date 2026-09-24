@@ -456,33 +456,26 @@ apply_geom(wm_t *wm, client_t *c, int x, int y, unsigned w, unsigned h)
         y = home->geom.y;
         w = home->geom.w;
         h = home->geom.h;
-    } else if (cfg.corner_radius > 0 && !c->deco) {
-        client_shape(wm, c, cfg.corner_radius);
     }
+    if (cfg.corner_radius > 0 && !c->fullscreen)
+        client_shape(wm, c, cfg.corner_radius);
     c->x = x;
     c->y = y;
     c->w = w;
     c->h = h;
 
-    uint32_t vals[4] = { (uint32_t)x, (uint32_t)y, w, h };
-
-    if (c->deco) {
-        /* The client lives at (0,title_h) inside the wrapper; deco_update
-         * positions wrapper and child from the client-area rect, and
-         * stretches both over the whole output for fullscreen. */
-        deco_update(wm, c);
-        if (c->fullscreen && home)
-            xcb_configure_window(wm->conn, c->win,
-                XCB_CONFIG_WINDOW_BORDER_WIDTH, (uint32_t[]){ 0 });
-    } else {
-        if (c->fullscreen && home)
-            xcb_configure_window(wm->conn, c->win,
-                XCB_CONFIG_WINDOW_BORDER_WIDTH, (uint32_t[]){ 0 });
+    if (c->fullscreen && home)
         xcb_configure_window(wm->conn, c->win,
-            XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
-                XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
-            vals);
-    }
+            XCB_CONFIG_WINDOW_BORDER_WIDTH, (uint32_t[]){ 0 });
+    /* The client is always a direct root child (deco is a standalone
+     * strip, never a wrapper), so its geometry is root-relative and an
+     * ARGB application keeps compositing straight against the desktop. */
+    xcb_configure_window(wm->conn, c->win,
+        XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
+            XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+        (uint32_t[]){ (uint32_t)x, (uint32_t)y, w, h });
+    if (c->deco)
+        deco_update(wm, c); /* keep the title bar glued to the top edge */
     xcb_send_event(wm->conn, 0, c->win, XCB_EVENT_MASK_STRUCTURE_NOTIFY,
         (const char *)&(xcb_configure_notify_event_t){
             .response_type = XCB_CONFIGURE_NOTIFY,
@@ -507,22 +500,17 @@ client_poll_urgency(wm_t *wm, client_t *c)
         client_set_urgent(wm, c, true);
 }
 
-/* Return the top-level window for a client: the deco wrapper if present,
- * else the client window itself. This is the window that actually controls
- * top-level stacking. */
-static xcb_window_t
-client_top_win(client_t *c)
-{
-    return c->deco ? c->deco->win : c->win;
-}
-
 /* ICCCM §4.2.3: a transient must stay stacked above its parent, so
  * raising a client re-raises any of its transients (and theirs, so a
- * dialog chain stays on top). Depth-bounded against transient cycles. */
+ * dialog chain stays on top). Depth-bounded against transient cycles.
+ * A decorated client's title bar is a separate top-level window, so it
+ * is raised first and the client lands on top of it. */
 static void
 raise_client_depth(wm_t *wm, client_t *c, unsigned depth)
 {
-    raise_window(wm, client_top_win(c));
+    if (c->deco)
+        raise_window(wm, c->deco->win);
+    raise_window(wm, c->win);
     if (depth >= 8)
         return;
     for (client_t *t = wm->clients; t; t = t->next)
@@ -575,7 +563,33 @@ focus(wm_t *wm, client_t *c)
             deco_draw(wm, c);
         xcb_set_input_focus(wm->conn, XCB_INPUT_FOCUS_POINTER_ROOT, c->win,
             XCB_CURRENT_TIME);
-        raise_client(wm, c);
+        if (menu_active()) {
+            /* A panel is open (grab held): park the focus target just
+             * below the panel instead of raising it over everything.
+             * Raising a full-workarea window (monocle/float) to the
+             * absolute top each switcher keystroke un-covered and
+             * re-covered the panel and left the client stacked over the
+             * status bar — per-key restack churn that a compositor
+             * re-presents as screen-wide flicker. */
+            xcb_window_t top = menu_top_window();
+
+            if (top == XCB_NONE)
+                raise_client(wm, c);
+            else {
+                /* Both surfaces drop below the panel: the client and,
+                 * when decorated, its standalone title bar. */
+                if (c->deco)
+                    xcb_configure_window(wm->conn, c->deco->win,
+                        XCB_CONFIG_WINDOW_SIBLING |
+                            XCB_CONFIG_WINDOW_STACK_MODE,
+                        (const uint32_t[]){ top, XCB_STACK_MODE_BELOW });
+                xcb_configure_window(wm->conn, c->win,
+                    XCB_CONFIG_WINDOW_SIBLING |
+                        XCB_CONFIG_WINDOW_STACK_MODE,
+                    (const uint32_t[]){ top, XCB_STACK_MODE_BELOW });
+            }
+        } else
+            raise_client(wm, c);
         workspaces[c->ws].sel = c;
         if (c->urgent)
             client_set_urgent(wm, c, false);

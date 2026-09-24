@@ -57,6 +57,7 @@ void menu_open(wm_t *wm);
 void menu_close(wm_t *wm);
 void menu_window_gone(wm_t *wm, xcb_window_t w);
 bool menu_active(void);
+xcb_window_t menu_top_window(void); /* panel/overlay window, XCB_NONE if none */
 void menu_bump(wm_t *wm); /* panel stays topmost over any raised client */
 bool menu_owns_window(xcb_window_t win);
 void menu_key(wm_t *wm, xcb_key_press_event_t *ev);
