@@ -215,6 +215,14 @@ gen_rows(void)
     r->uval = &cfg.deco_border;
     r = add_row(R_COLOR, 0, "deco_unfocus_border");
     r->uval = &cfg.deco_unfocus_border;
+    for (unsigned i = 0; i < 3; i++) {
+        static char btn_labels[3][16];
+
+        snprintf(btn_labels[i], sizeof(btn_labels[i]), "button %s",
+            i == 0 ? "min" : (i == 1 ? "max" : "close"));
+        r = add_row(R_STR, 0, btn_labels[i]);
+        r->sval = &cfg.deco_buttons[i];
+    }
 
     add_row(R_HDR, 0, "bar");
     r = add_row(R_ENUM, 0, "position");

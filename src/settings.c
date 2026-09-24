@@ -38,6 +38,8 @@ settings_defaults(settings_t *s)
     s->deco_title_h = 20;
     s->deco_border = 0x5f819d;
     s->deco_unfocus_border = 0x444444;
+    for (unsigned i = 0; i < 3; i++)
+        s->deco_buttons[i] = NULL; /* built-in nerd-font glyphs */
 
     s->bar_bottom = false;
     s->time_format = xstrdup("%a %d %b %H:%M");
@@ -100,6 +102,10 @@ settings_free_strings(settings_t *s)
     for (unsigned i = 0; i < WS_MAX; i++)
         free(s->ws_names[i]);
     memset(s->ws_names, 0, sizeof(s->ws_names));
+    for (unsigned i = 0; i < 3; i++) {
+        free(s->deco_buttons[i]);
+        s->deco_buttons[i] = NULL;
+    }
     s->terminal = s->font = s->time_format = s->default_layout = NULL;
     free(s->launcher_custom_dir);
     free(s->launcher_default_module);

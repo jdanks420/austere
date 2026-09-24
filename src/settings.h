@@ -47,6 +47,9 @@ typedef struct {
     unsigned deco_title_h;
     uint32_t deco_border;
     uint32_t deco_unfocus_border;
+    /* [deco] buttons: minimize, maximize, close glyphs; NULL/"" keeps
+     * the built-in nerd-font glyph */
+    char *deco_buttons[3];
 
     /* [bar] */
     bool bar_bottom;

@@ -22,10 +22,21 @@
 #define DECO_PAD 4
 #define DECO_ALPHA_MASK 0xd9000000 /* title strip pixel alpha (~85%) */
 
-/* Nerd Font button glyphs (UTF-8 encoded). */
+/* Nerd Font button glyphs (UTF-8 encoded); each is overridable through
+ * [deco] buttons = ["<min>", "<max>", "<close>"] in the config, and an
+ * empty entry keeps the built-in glyph. */
 static const char GLYPH_MIN[] = "\xee\x80\x80";   /* U+E000  */
 static const char GLYPH_MAX[] = "\xf3\xb0\x9d\xa4"; /* U+F0764 󰝤 */
 static const char GLYPH_CLOSE[] = "\xf3\xb0\x9a\x8c"; /* U+F068C 󰚌 */
+
+static const char *
+btn_glyph(unsigned i)
+{
+    const char *want = i < 3 ? cfg.deco_buttons[i] : NULL;
+    static const char *fallback[3] = { GLYPH_MIN, GLYPH_MAX, GLYPH_CLOSE };
+
+    return (want && *want) ? want : fallback[i];
+}
 
 client_t *
 find_client_by_deco(wm_t *wm, xcb_window_t win)
@@ -307,34 +318,27 @@ deco_draw_title(wm_t *wm, client_t *c)
         cfg.bar_fg | a, cfg.bar_bg | a);
 
     /* Button glyphs: minimize, maximize, close (right-to-left). */
-    draw_text(wm, &d->draw, f, d->min_x, baseline, GLYPH_MIN,
-        sizeof(GLYPH_MIN) - 1, cfg.bar_fg | a, cfg.bar_bg | a);
-    draw_text(wm, &d->draw, f, d->max_x, baseline, GLYPH_MAX,
-        sizeof(GLYPH_MAX) - 1, cfg.bar_fg | a, cfg.bar_bg | a);
-    draw_text(wm, &d->draw, f, d->close_x, baseline, GLYPH_CLOSE,
-        sizeof(GLYPH_CLOSE) - 1, cfg.bar_fg | a, cfg.bar_bg | a);
+    for (unsigned i = 0; i < 3; i++) {
+        const char *g = btn_glyph(i);
+        int gx = i == 0 ? d->min_x : (i == 1 ? d->max_x : d->close_x);
+
+        draw_text(wm, &d->draw, f, gx, baseline, g, strlen(g),
+            cfg.bar_fg | a, cfg.bar_bg | a);
+    }
 }
 
 void
 deco_draw(wm_t *wm, client_t *c)
 {
-    if (!c->deco || c->fullscreen)
+    if (!c->deco || !deco_visible(c))
         return;
     deco_compute_buttons(c->deco);
     deco_draw_title(wm, c);
 }
 
-/* Round the wrapper to match corner_radius. The wrapper is the whole
- * window surface — title strip drawn on top, reparented client covering
- * the area below — so its bounding shape must span the ENTIRE wrapper:
- * a strip-only shape would clip the child client out (a parent's
- * bounding shape clips its children's output), leaving just the
- * titlebar visible. The wrapper paints nothing over the client area
- * (no background pixel on opaque servers, zero-alpha ARGB with a
- * compositor), so the client's own pixels show through unchanged.
- * Rounding shapes the full wrapper; the client adds its own inner
- * rounding so only the outer silhouette is clipped (§5.7). Fullscreen
- * keeps its square unshaped surface. */
+/* Round the strip to match corner_radius. Only the strip is shaped here:
+ * the client is no longer a child of it, so the client's own pixels are
+ * never clipped and it keeps its independent inner rounding (§5.7). */
 void
 deco_shape(wm_t *wm, client_t *c)
 {

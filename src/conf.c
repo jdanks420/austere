@@ -415,6 +415,28 @@ conf_load(const char *path, settings_t *s, bool strict)
         get_color(dec, "deco_border", &s->deco_border, &bad, strict);
         get_color(dec, "deco_unfocus_border", &s->deco_unfocus_border,
             &bad, strict);
+        toml_datum_t btn = toml_get(dec, "buttons");
+
+        if (btn.type == TOML_ARRAY) {
+            /* positional: minimize, maximize, close. Short arrays and
+             * empty strings keep the built-in glyph for that button. */
+            for (int32_t i = 0; i < btn.u.arr.size && i < 3; i++) {
+                toml_datum_t e = btn.u.arr.elem[i];
+
+                if (e.type != TOML_STRING) {
+                    warn_at(&e, "deco button glyph must be a string");
+                    if (strict)
+                        bad = true;
+                    continue;
+                }
+                free(s->deco_buttons[i]);
+                s->deco_buttons[i] = xstrdup(e.u.s);
+            }
+        } else if (btn.type != TOML_UNKNOWN) {
+            warn_at(&btn, "[deco] buttons must be an array of 3 strings");
+            if (strict)
+                bad = true;
+        }
     }
     if (bar.type == TOML_TABLE) {
         static const char *const pos[] = { "top", "bottom", NULL };
@@ -662,16 +684,28 @@ conf_write(const char *path, const settings_t *s)
         "urgent_color = \"%s\"\ngap = %u\n"
         "smart_gaps = %s\nfont = \"%s\"\n\n"
         "[deco]\ndeco = %s\ndeco_title_h = %u\ndeco_border = \"%s\"\n"
-        "deco_unfocus_border = \"%s\"\n\n"
-        "[bar]\nposition = \"%s\"\ntime_format = \"%s\"\n"
-        "bar_bg = \"%s\"\nbar_fg = \"%s\"\nbar_gap = %u",
+        "deco_unfocus_border = \"%s\"\n",
         esc_term, s->socket ? "true" : "false",
         s->border_width, s->corner_radius,
         HEXCOL(0, focus_color), HEXCOL(1, unfocus_color),
         HEXCOL(2, urgent_color), s->gap, s->smart_gaps ? "true" : "false",
         esc_font, s->deco ? "true" : "false",
         s->deco_title_h,
-        HEXCOL(5, deco_border), HEXCOL(6, deco_unfocus_border),
+        HEXCOL(5, deco_border), HEXCOL(6, deco_unfocus_border));
+    if (s->deco_buttons[0] || s->deco_buttons[1] || s->deco_buttons[2]) {
+        char esc_btn[3][512];
+
+        for (unsigned i = 0; i < 3; i++)
+            toml_escape(esc_btn[i], sizeof(esc_btn[i]),
+                s->deco_buttons[i] ? s->deco_buttons[i] : "");
+        fprintf(f,
+            "buttons = [\"%s\", \"%s\", \"%s\"]"
+            "  # minimize, maximize, close\n",
+            esc_btn[0], esc_btn[1], esc_btn[2]);
+    }
+    fprintf(f,
+        "\n[bar]\nposition = \"%s\"\ntime_format = \"%s\"\n"
+        "bar_bg = \"%s\"\nbar_fg = \"%s\"\nbar_gap = %u",
         s->bar_bottom ? "bottom" : "top", esc_time,
         HEXCOL(3, bar_bg), HEXCOL(4, bar_fg), s->bar_gap);
     fprintf(f, "\nmodules_left = [");
@@ -848,6 +882,7 @@ fprintf(f,
         "deco_title_h = 20            # 10..40\n"
         "deco_border = \"#5f819d\"       # focused decoration border\n"
         "deco_unfocus_border = \"#444444\"\n"
+        "# buttons = [\"\", \"\", \"\"]       # minimize, maximize, close glyphs\n"
         "\n[bar]\nposition = \"top\"          # top | bottom\n"
         "time_format = \"%%a %%d %%b %%H:%%M\"\nbar_bg = \"#1a1a1a\"\n"
         "bar_fg = \"#cccccc\"\nbar_gap = 0\n"

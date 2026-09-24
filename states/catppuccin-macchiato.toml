@@ -20,6 +20,7 @@ deco = false
 deco_title_h = 20
 deco_border = "#494d64"
 deco_unfocus_border = "#24273a"
+# buttons = ["", "", ""]       # minimize, maximize, close glyphs
 
 [bar]
 position = "top"
