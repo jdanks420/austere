@@ -26,6 +26,7 @@
 #include "ewmh.h"
 #include "apps.h"
 #include "event.h"
+#include "notify.h"
 #include "popup.h"
 #include "layout.h"
 #include "volume.h"
@@ -498,6 +499,9 @@ handle_event(wm_t *wm, xcb_generic_event_t *ev)
             break;
         if (deco_button_hit(wm, bev, bev->detail))
             break;
+        if (popup_button(wm, bev->event, bev->event_x, bev->event_y,
+                bev->detail))
+            break;
         if (!bar_button(wm, bev->event, bev->event_x, bev->detail))
             mouse_press(wm, bev);
         break;
@@ -505,6 +509,8 @@ handle_event(wm_t *wm, xcb_generic_event_t *ev)
     case XCB_EXPOSE:
         if (menu_owns_window(((xcb_expose_event_t *)ev)->window))
             menu_expose(wm);
+        else if (popup_expose(wm, ((xcb_expose_event_t *)ev)->window))
+            ;
         else if (find_client_by_deco(wm,
             ((xcb_expose_event_t *)ev)->window))
             deco_draw(wm, find_client_by_deco(wm,
@@ -562,6 +568,7 @@ event_loop(wm_t *wm)
     xcb_generic_event_t *ev;
     char buf[16];
     int sk_idx = -1;
+    int nf_idx = -1;
 
     memcpy(all, fds, sizeof(fds));
     unsigned nfds = 2;
@@ -592,6 +599,15 @@ event_loop(wm_t *wm)
             nfds++;
         } else
             sk_idx = -1;
+        int nfd = notify_fd();
+
+        if (nfd >= 0 && nfds < 64) {
+            all[nfds].fd = nfd;
+            all[nfds].events = POLLIN;
+            nf_idx = (int)nfds;
+            nfds++;
+        } else
+            nf_idx = -1;
         int timeout = bar_timeout_ms(wm);
         int pt = popups_timeout_ms(wm);
 
@@ -618,6 +634,8 @@ event_loop(wm_t *wm)
             if (all[i].revents & (POLLIN | POLLHUP)) {
                 if ((int)i == sk_idx)
                     socket_handle(wm);
+                else if ((int)i == nf_idx)
+                    notify_pump(wm);
                 else
                     bar_pump_fd(wm, all[i].fd);
             }

@@ -14,15 +14,24 @@ WPFLAGS = -DAUSTERE_NO_IMLIB2
 else
 WPLIBS  = -lImlib2
 endif
+
+# Desktop notification service (org.freedesktop.Notifications). Optional:
+# AUSTERE_NO_DBUS=1 builds a WM that never owns the bus name.
+ifeq ($(AUSTERE_NO_DBUS),1)
+NOTIFYFLAGS = -DAUSTERE_NO_DBUS
+else
+NOTIFYFLAGS = $(shell pkg-config --cflags dbus-1)
+NOTIFYLIBS  = $(shell pkg-config --libs dbus-1)
+endif
 BIN     = austere
 
 .PHONY: clean install uninstall install-states
 
 $(BIN): $(OBJS) Makefile
-	$(CC) $(CFLAGS) $(WPFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(WPLIBS)
+	$(CC) $(CFLAGS) $(WPFLAGS) $(NOTIFYFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(WPLIBS) $(NOTIFYLIBS)
 
 %.o: %.c
-	$(CC) $(CFLAGS) $(WPFLAGS) -MMD -MP -c $< -o $@
+	$(CC) $(CFLAGS) $(WPFLAGS) $(NOTIFYFLAGS) -MMD -MP -c $< -o $@
 
 -include $(DEPS)
 

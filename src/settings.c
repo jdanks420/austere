@@ -51,6 +51,9 @@ settings_defaults(settings_t *s)
     s->raise_on_click = true;
     s->snap_distance = 12;
     s->popup_timeout = 5;
+    s->notify_enabled = true;
+    s->notify_timeout = 8;
+    s->notify_max = 4;
     s->swallowing = false;
 
     s->default_layout = xstrdup("tile");

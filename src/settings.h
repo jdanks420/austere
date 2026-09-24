@@ -71,6 +71,10 @@ typedef struct {
     bool raise_on_click;
     unsigned snap_distance;
     unsigned popup_timeout;
+    /* [notifications] */
+    bool notify_enabled;     /* serve org.freedesktop.Notifications */
+    unsigned notify_timeout; /* default toast life, seconds */
+    unsigned notify_max;     /* toasts kept in the stack */
     bool swallowing;
 
     /* [layouts] */

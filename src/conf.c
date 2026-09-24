@@ -467,6 +467,21 @@ conf_load(const char *path, settings_t *s, bool strict)
             strict);
         get_bool(beh, "swallowing", &s->swallowing, &bad, strict);
     }
+    {
+        toml_datum_t nt = toml_get(r.toptab, "notifications");
+
+        if (nt.type == TOML_TABLE) {
+            get_bool(nt, "enabled", &s->notify_enabled, &bad, strict);
+            get_int(nt, "timeout", 1, 60, &s->notify_timeout, &bad,
+                strict);
+            get_int(nt, "max_toasts", 1, 8, &s->notify_max, &bad,
+                strict);
+        } else if (nt.type != TOML_UNKNOWN) {
+            warn_at(&nt, "[notifications] must be a table");
+            if (strict)
+                bad = true;
+        }
+    }
     if (lay.type == TOML_TABLE) {
         get_str(lay, "default", &s->default_layout, &bad, strict);
         get_int(lay, "nmaster", 1, WS_MAX, &s->nmaster, &bad, strict);
@@ -731,6 +746,10 @@ conf_write(const char *path, const settings_t *s)
         s->snap_distance, s->popup_timeout,
         s->swallowing ? "true" : "false",
         esc_layout, s->nmaster, s->split_ratio, s->ratio_step);
+    fprintf(f,
+        "[notifications]\nenabled = %s\ntimeout = %u\nmax_toasts = %u\n\n",
+        s->notify_enabled ? "true" : "false", s->notify_timeout,
+        s->notify_max);
 #undef HEXCOL
 
     fprintf(f, "[workspaces]\nnames = [");
@@ -897,6 +916,10 @@ fprintf(f,
         "\n[behavior]\nfocus_follows_mouse = true\n"
         "raise_on_click = true\nsnap_distance = 12\npopup_timeout = 5\n"
         "swallowing = false           # adopt windows spawned by terminal\n"
+        "\n[notifications]\n"
+        "enabled = true              # serve org.freedesktop.Notifications\n"
+        "timeout = 8                 # default toast life, seconds\n"
+        "max_toasts = 4              # stack depth\n"
         "\n[layouts]\ndefault = \"tile\"        # tile | monocle\n"
         "nmaster = 1\nsplit_ratio = 0.50\nratio_step = 0.05\n"
         "\n[workspaces]\nnames = [\"\", \"\", \"\", \"\", \"\", \"\", "

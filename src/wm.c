@@ -21,6 +21,7 @@
 #include "bar.h"
 #include "draw.h"
 #include "ewmh.h"
+#include "notify.h"
 #include "popup.h"
 #include "settings.h"
 #include "states.h"
@@ -216,6 +217,7 @@ shutdown(wm_t *wm)
 {
     socket_shutdown(wm);
     bars_shutdown(wm);
+    notify_shutdown(wm);
     popups_shutdown(wm);
     draw_shutdown(wm);
     ungrab_keys(wm);
@@ -339,6 +341,7 @@ wm_main(int argc, char **argv)
     grab_keys(&wm);
     bar_init(&wm);
     popups_init(&wm);
+    notify_init(&wm);
     bars_sync(&wm);
 
     deco_init(&wm);
