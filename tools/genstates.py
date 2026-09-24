@@ -168,6 +168,7 @@ scope = "all"
 
 [launcher]
 scan_path = true
+desktop_entries = true
 history_size = 20
 
 [wallpaper]

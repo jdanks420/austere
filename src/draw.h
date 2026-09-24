@@ -19,6 +19,13 @@ typedef struct draw {
     uint8_t depth;       /* drawable depth, queried at draw_setup */
 } draw_t;
 
+/* Decoded image ready to blit: host-order ARGB32 plus its size. Owned by
+ * whoever produced it (the shared icon cache); callers only read it. */
+typedef struct image {
+    uint32_t *argb;
+    unsigned w, h;
+} image_t;
+
 #define DRAW_DEFAULT_FONT "Agave Nerd Font Mono:pixelsize=16"
 
 font_t *draw_font(wm_t *wm, const char *pattern);

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 #include "actions.h"
 #include "bar.h"
@@ -293,6 +294,8 @@ gen_rows(void)
     r->eset = scope_set;
     r = add_row(R_BOOL, 0, "launcher_scan_path");
     r->bval = &cfg.launcher_scan_path;
+    r = add_row(R_BOOL, 0, "launcher_desktop");
+    r->bval = &cfg.launcher_desktop;
     r = add_row(R_STR, 0, "launcher_custom_dir");
     r->sval = &cfg.launcher_custom_dir;
     r = add_row(R_INT, 0, "launcher_history_size");
@@ -647,9 +650,11 @@ static panel_def_t pdef;
 static char pinput[256];
 static overlay_t overlay;
 static bool overlay_active;
-static char **pview; /* filtered row indices */
+static unsigned *pview; /* filtered rows: indices into pdef.rows */
 static unsigned pview_n;
 static unsigned psel;
+static image_t **picons; /* lazy per-row icon cache, NULL = text */
+static int *fzscore; /* per-row fuzzy score map while sorting tier 3 */
 static char ptitle[64];
 static char pprompt[64];
 
@@ -667,43 +672,114 @@ ncasestr(const char *hay, const char *needle)
 }
 
 static int
-cmp_str(const void *a, const void *b)
+cmp_row_idx(const void *a, const void *b)
 {
-    return strcmp(*(const char *const *)a, *(const char *const *)b);
+    return strcmp(pdef.rows[*(const unsigned *)a],
+        pdef.rows[*(const unsigned *)b]);
 }
 
-/* Prefix matches rank before substring matches; each group is
- * alphabetized so the top row is deterministic. */
+static int
+cmp_fuzzy(const void *a, const void *b)
+{
+    unsigned ia = *(const unsigned *)a, ib = *(const unsigned *)b;
+
+    if (fzscore[ia] != fzscore[ib])
+        return fzscore[ib] - fzscore[ia];
+    return strcmp(pdef.rows[ia], pdef.rows[ib]);
+}
+
+/* fzy-style subsequence scorer for the fuzzy tier: 0 when `in` is not
+ * a subsequence of `s`, otherwise a positive score with bonuses for
+ * row/word starts and contiguous runs. Case-insensitive bytewise. */
+static int
+fuzzy_score(const char *s, const char *in)
+{
+    unsigned last = 0, run = 0, score = 1;
+
+    for (const char *p = in; *p; p++) {
+        const char *hit = NULL;
+
+        for (const char *c = s + last; *c; c++)
+            if (tolower((unsigned char)*c) == tolower((unsigned char)*p)) {
+                hit = c;
+                break;
+            }
+        if (!hit)
+            return 0;
+        unsigned d = (unsigned)(hit - s);
+        int bonus = 0;
+
+        if (d == 0)
+            bonus = 8; /* row start */
+        else if (hit[-1] == ' ' || hit[-1] == '-' || hit[-1] == '_')
+            bonus = 6; /* word start */
+        else if (d == last) {
+            run++;
+            bonus = 2 + (int)run; /* contiguous run */
+        } else {
+            run = 0;
+        }
+        score += (unsigned)(1 + bonus);
+        last = d + 1;
+    }
+    return (int)score;
+}
+
+/* Ranked tiers: prefix matches, then substrings, then fuzzy
+ * subsequences; each tier is deterministic (alphabetical, or score for
+ * the fuzzy tier) so the top row never flickers. */
 static void
 panel_refilter(void)
 {
     free(pview);
-    pview = pdef.nrows
-        ? xmalloc(pdef.nrows * sizeof(char *))
-        : NULL;
+    pview = pdef.nrows ? xmalloc(pdef.nrows * sizeof(unsigned)) : NULL;
     pview_n = 0;
     if (!pinput[0] || !pdef.filter) {
         /* keep the opener's curated order (history first) */
         for (unsigned i = 0; i < pdef.nrows; i++)
-            pview[pview_n++] = pdef.rows[i];
-    } else {
-        size_t plen = strlen(pinput);
-
-        for (unsigned i = 0; i < pdef.nrows; i++)
-            if (strncasecmp(pdef.rows[i], pinput, plen) == 0)
-                pview[pview_n++] = pdef.rows[i];
-        unsigned nprefix = pview_n;
-
-        for (unsigned i = 0; i < pdef.nrows; i++)
-            if (ncasestr(pdef.rows[i], pinput) &&
-                strncasecmp(pdef.rows[i], pinput, plen) != 0)
-                pview[pview_n++] = pdef.rows[i];
-        if (nprefix > 1)
-            qsort(pview, nprefix, sizeof(char *), cmp_str);
-        if (pview_n - nprefix > 1)
-            qsort(pview + nprefix, pview_n - nprefix, sizeof(char *),
-                cmp_str);
+            pview[pview_n++] = i;
+        if (psel >= pview_n)
+            psel = pview_n ? pview_n - 1 : 0;
+        return;
     }
+    size_t plen = strlen(pinput);
+    bool *skip = pdef.nrows ? calloc(pdef.nrows, sizeof(bool)) : NULL;
+
+    for (unsigned i = 0; i < pdef.nrows; i++)
+        if (strncasecmp(pdef.rows[i], pinput, plen) == 0) {
+            pview[pview_n++] = i;
+            skip[i] = true;
+        }
+    unsigned t1 = pview_n;
+
+    for (unsigned i = 0; i < pdef.nrows; i++)
+        if (!skip[i] && ncasestr(pdef.rows[i], pinput)) {
+            pview[pview_n++] = i;
+            skip[i] = true;
+        }
+    unsigned t2 = pview_n;
+
+    free(fzscore);
+    fzscore = pdef.nrows ? malloc(pdef.nrows * sizeof(int)) : NULL;
+    for (unsigned i = 0; fzscore && i < pdef.nrows; i++) {
+        int sc;
+
+        if (!skip[i] && (sc = fuzzy_score(pdef.rows[i], pinput)) > 0) {
+            fzscore[i] = sc;
+            pview[pview_n++] = i;
+        }
+    }
+    unsigned t3 = pview_n;
+
+    if (t1 > 1)
+        qsort(pview, t1, sizeof(unsigned), cmp_row_idx);
+    if (t2 - t1 > 1)
+        qsort(pview + t1, t2 - t1, sizeof(unsigned), cmp_row_idx);
+    if (t3 - t2 > 1)
+        qsort(pview + t2, t3 - t2, sizeof(unsigned), cmp_fuzzy);
+    free(skip);
+    free(fzscore);
+    fzscore = NULL;
     if (psel >= pview_n)
         psel = pview_n ? pview_n - 1 : 0;
 }
@@ -796,13 +872,32 @@ panel_draw(wm_t *wm)
         (unsigned)strlen(ptitle), fg, bg);
 
     for (unsigned i = 0; i < nvis; i++) {
-        const char *row = pview[base + i];
+        unsigned g = pview[base + i];
+        const char *row = pdef.rows[g];
         bool selected = base + i == psel;
 
         if (selected)
             draw_rect(wm, &draw, 3, (int)(row_h() + i * row_h()),
                 w - 6, row_h(), ac);
-        draw_text(wm, &draw, f, 6, (int)(row_h() + i * row_h() + row_h() - 5),
+        image_t *ico = NULL;
+
+        if (picons) {
+            if (!picons[g])
+                picons[g] = pdef.row_icon(wm, g);
+            ico = picons[g];
+        }
+        int tx = 6;
+
+        if (ico && ico->argb) {
+            int iy = (int)(row_h() + i * row_h()) +
+                ((int)row_h() - (int)ico->h) / 2;
+
+            draw_put_image24(wm, win, draw.gc, draw.depth, 6,
+                (int16_t)iy, ico->w, ico->h, ico->argb);
+            tx = 6 + (int)ico->w + 6;
+        }
+        draw_text(wm, &draw, f, tx,
+            (int)(row_h() + i * row_h() + row_h() - 5),
             row, (unsigned)strlen(row),
             selected ? bg : fg,
             selected ? ac : bg);
@@ -870,7 +965,7 @@ static void
 panel_finish(wm_t *wm, bool run_enter)
 {
     char input[256];
-    const char *row = pview_n ? pview[psel] : NULL;
+    const char *row = pview_n ? pdef.rows[pview[psel]] : NULL;
 
     snprintf(input, sizeof(input), "%s", pinput);
     if (run_enter && pdef.on_enter) {
@@ -888,6 +983,8 @@ panel_finish(wm_t *wm, bool run_enter)
     free(pview);
     pview = NULL;
     pview_n = 0;
+    free(picons);
+    picons = NULL;
     pinput[0] = '\0';
     memset(&pdef, 0, sizeof(pdef));
     xcb_ungrab_keyboard(wm->conn, XCB_CURRENT_TIME);
@@ -926,7 +1023,7 @@ panel_preview(wm_t *wm)
 {
     if (!pdef.on_preview || !pview_n)
         return;
-    pdef.on_preview(wm, pview[psel]);
+    pdef.on_preview(wm, pdef.rows[pview[psel]]);
     /* live switch raised the target client; keep the panel on top */
     raise_window(wm, win);
 }
@@ -974,7 +1071,7 @@ panel_key(wm_t *wm, xcb_key_press_event_t *ev)
             size_t n = strlen(pinput);
 
             for (unsigned i = 0; i < pview_n; i++) {
-                const char *r = pview[i];
+                const char *r = pdef.rows[pview[i]];
 
                 if (strncasecmp(r, pinput, n) != 0)
                     continue;
@@ -986,7 +1083,8 @@ panel_key(wm_t *wm, xcb_key_press_event_t *ev)
                     bool all = true;
 
                     for (unsigned j = 0; j < pview_n; j++)
-                        if (strncasecmp(pview[j], cand, n + 1) != 0)
+                        if (strncasecmp(pdef.rows[pview[j]], cand,
+                                n + 1) != 0)
                             all = false;
                     if (!all)
                         break;
@@ -1053,6 +1151,9 @@ panel_open(wm_t *wm, const panel_def_t *def)
     snprintf(pprompt, sizeof(pprompt), "%s",
         def->prompt ? def->prompt : "");
     row_h_update(wm);
+    free(picons);
+    picons = def->row_icon && def->nrows
+        ? calloc(def->nrows, sizeof(*picons)) : NULL;
     panel_refilter();
     if (psel < def->init_sel && def->init_sel < pview_n)
         psel = def->init_sel;

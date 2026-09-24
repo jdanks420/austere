@@ -97,6 +97,7 @@ typedef struct {
 
     /* [launcher] */
     bool launcher_scan_path;
+    bool launcher_desktop; /* list .desktop applications (friendly names) */
     char *launcher_custom_dir;
     unsigned launcher_history_size;
     char *launcher_default_module;

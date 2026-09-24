@@ -2,7 +2,9 @@
 #define AUSTERE_MENU_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
+#include "draw.h"
 #include "wm.h"
 
 /* Settings menu (SPEC §9.3): a native modal panel over draw.c
@@ -21,6 +23,9 @@ typedef struct {
     bool tab_complete;  /* Tab completes common prefix (launcher) */
     bool hold_alt;      /* closing Alt release closes the panel */
     unsigned init_sel;  /* preselected row at open; live-previewed once */
+    /* optional per-row icon lookup, keyed by row index; NULL rows draw
+     * text-only. Returns a pointer that stays valid for the session. */
+    image_t *(*row_icon)(wm_t *wm, unsigned rowidx);
     /* return true to keep the panel open (input may be replaced via
      * panel_set_input — bare module selection in the launcher) */
     bool (*on_enter)(wm_t *wm, const char *input, const char *row);

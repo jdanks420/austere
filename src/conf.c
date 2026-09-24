@@ -517,6 +517,8 @@ conf_load(const char *path, settings_t *s, bool strict)
     if (lnch.type == TOML_TABLE) {
         get_bool(lnch, "scan_path", &s->launcher_scan_path, &bad,
             strict);
+        get_bool(lnch, "desktop_entries", &s->launcher_desktop, &bad,
+            strict);
         get_str(lnch, "custom_dir", &s->launcher_custom_dir, &bad,
             strict);
         get_int(lnch, "history_size", 0, 500, &s->launcher_history_size,
@@ -779,8 +781,10 @@ conf_write(const char *path, const settings_t *s)
         s->switcher_live_preview ? "true" : "false");
 
     fprintf(f,
-        "[launcher]\nscan_path = %s\nhistory_size = %u\n",
+        "[launcher]\nscan_path = %s\ndesktop_entries = %s\n"
+        "history_size = %u\n",
         s->launcher_scan_path ? "true" : "false",
+        s->launcher_desktop ? "true" : "false",
         s->launcher_history_size);
     if (s->launcher_custom_dir && esc_custom[0])
         fprintf(f, "custom_dir = \"%s\"\n", esc_custom);
@@ -922,6 +926,7 @@ fprintf(f,
         "move_button = 1\nresize_button = 3\n"
         "\n[switcher]\nscope = \"all\"         # all | monitor\n"
         "\n[launcher]\nscan_path = true       # index $PATH executables\n"
+        "desktop_entries = true    # list .desktop applications by name\n"
         "# custom_dir = \"/home/user/.local/bin\"  # extra scripts beyond $PATH\n"
         "history_size = 20            # 0..500\n"
         "# default_module = \"web\"   # unmatched input goes to this module\n"

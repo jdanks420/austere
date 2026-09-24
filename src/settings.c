@@ -68,6 +68,7 @@ settings_defaults(settings_t *s)
     s->switcher_live_preview = true;
 
     s->launcher_scan_path = true;
+    s->launcher_desktop = true;
     s->launcher_custom_dir = NULL;
     s->launcher_history_size = 20;
     s->launcher_default_module = NULL;
