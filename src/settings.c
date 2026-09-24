@@ -207,7 +207,8 @@ settings_set_active_conf(const char *path)
 void
 settings_reload(wm_t *wm)
 {
-    settings_apply_file(wm, conf_path(), "config reloaded");
+    settings_apply_file(wm,
+        active_conf[0] ? active_conf : conf_path(), "config reloaded");
 }
 
 /* Transactional load of ANY config file: parse into scratch; on error
@@ -228,6 +229,7 @@ settings_apply_file(wm_t *wm, const char *path, const char *ok_msg)
     }
 
     settings_swap(&cfg, &scratch);
+    settings_set_active_conf(path);
 
     ungrab_keys(wm);
     grab_keys(wm);

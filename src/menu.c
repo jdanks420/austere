@@ -1478,9 +1478,12 @@ menu_key(wm_t *wm, xcb_key_press_event_t *ev)
 
     /* navigation */
     if (state & XCB_MOD_MASK_CONTROL && sym == 's') {
-        if (conf_write(conf_path(), &cfg))
+        if (conf_write(conf_path(), &cfg)) {
+            /* The saved file now mirrors the running config, so a later
+             * reload should re-read it rather than a state file. */
+            settings_set_active_conf(conf_path());
             popup_notify(wm, "settings saved");
-        else
+        } else
             popup_notify(wm, "save failed");
         return;
     }

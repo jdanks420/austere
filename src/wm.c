@@ -310,6 +310,9 @@ wm_main(int argc, char **argv)
         const char *state = states_boot_override();
 
         conf_load(state ? state : conf_path(), &cfg, false);
+        /* Remember what we came from: super+Escape must re-read this
+         * same file, not fall back to austere.conf. */
+        settings_set_active_conf(state ? state : conf_path());
     }
     workspaces_init(&wm);
     ewmh_init(&wm);

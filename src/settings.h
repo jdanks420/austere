@@ -125,6 +125,9 @@ void settings_defaults(settings_t *s);
 void settings_free_strings(settings_t *s);
 void settings_swap(settings_t *dst, settings_t *src);
 void settings_reapply_clients(wm_t *wm);
+/* Record which file the running config came from (state or austere.conf)
+ * so reload re-reads that one. */
+void settings_set_active_conf(const char *path);
 
 const char *conf_path(void);
 

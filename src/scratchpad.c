@@ -64,8 +64,11 @@ show_scratch(wm_t *wm, client_t *c)
         h = m->geom.h;
     c->x = m->geom.x + (int)(m->geom.w - w) / 2;
     c->y = m->geom.y + (int)(m->geom.h - h) / 2;
-    apply_geom(wm, c, c->x, c->y, w, h);
+    /* Clear the hidden flag BEFORE the geometry apply: that is what
+     * decides whether the decoration strip is mapped alongside the
+     * client, so flipping it afterwards would leave the strip behind. */
     c->scratch_hidden = false;
+    apply_geom(wm, c, c->x, c->y, w, h);
     xcb_map_window(wm->conn, c->win);
     raise_client(wm, c);
     focus(wm, c);
