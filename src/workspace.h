@@ -26,6 +26,8 @@ void workspaces_init(wm_t *wm);
 void workspaces_shutdown(void);
 
 void view_ws(wm_t *wm, unsigned idx);
+void view_ws_prev(wm_t *wm); /* step to previous workspace, wrapping */
+void view_ws_next(wm_t *wm); /* step to next workspace, wrapping */
 void send_focused_to_ws(wm_t *wm, unsigned idx);
 void send_client_to_ws(wm_t *wm, struct client *c, unsigned idx);
 void ws_migrate_focused_to_next(wm_t *wm);

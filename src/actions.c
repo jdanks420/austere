@@ -16,6 +16,8 @@ static const action_ent_t registry[] = {
     { "view_ws", ACT_VIEW_WS }, /* +0..WS_MAX-1 at parse time */
     { "send_ws", ACT_SEND_WS },
     { "toggle_prev_ws", ACT_TOGGLE_PREV_WS },
+    { "view_ws_prev", ACT_VIEW_PREV_WS },
+    { "view_ws_next", ACT_VIEW_NEXT_WS },
     { "scratch_toggle", ACT_SCRATCH_TOGGLE },
     { "scratch_mark", ACT_SCRATCH_MARK },
     { "ws_to_monitor", ACT_WS_TO_NEXT_MON },

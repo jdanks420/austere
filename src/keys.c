@@ -191,6 +191,8 @@ keys_defaults(settings_t *s)
         { "alt+Right", "focus_right" },
         { "alt+Up", "focus_up" },
         { "alt+Down", "focus_down" },
+        { "super+Left", "view_ws_prev" },
+        { "super+Right", "view_ws_next" },
         { "XF86AudioRaiseVolume", "volume_raise" },
         { "XF86AudioLowerVolume", "volume_lower" },
         { "XF86AudioMute", "volume_mute" },

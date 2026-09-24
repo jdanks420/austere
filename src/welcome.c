@@ -15,6 +15,7 @@ static const char *const essentials[] = {
     "super+e             settings menu",
     "super+Tab           cycle windows (MRU)",
     "alt+q               close window",
+    "super+Left/Right     previous/next workspace",
     "super+m             quit",
     NULL,
 };
@@ -70,7 +71,7 @@ welcome_maybe_show(wm_t *wm)
         .title = "welcome to austere",
         .prompt = "",
         .rows = (char **)essentials,
-        .nrows = 7,
+        .nrows = 8,
         .filter = false,
         .tab_complete = false,
         .on_enter = welcome_enter,

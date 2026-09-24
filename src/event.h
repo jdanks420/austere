@@ -18,6 +18,8 @@ enum action_id {
     ACT_VIEW_WS = 0x10, /* +0..WS_MAX-1 */
     ACT_SEND_WS = 0x20, /* +0..WS_MAX-1 */
     ACT_TOGGLE_PREV_WS = 0x30,
+    ACT_VIEW_PREV_WS,  /* view_ws_prev: step to previous workspace (wraps) */
+    ACT_VIEW_NEXT_WS,  /* view_ws_next: step to next workspace (wraps) */
     ACT_SCRATCH_TOGGLE,
     ACT_SCRATCH_MARK,
     ACT_WS_TO_NEXT_MON,

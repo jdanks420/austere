@@ -135,6 +135,12 @@ run_action(wm_t *wm, uint8_t action)
             view_ws(wm, fm->ws_visible);
     }
         break;
+    case ACT_VIEW_PREV_WS:
+        view_ws_prev(wm);
+        break;
+    case ACT_VIEW_NEXT_WS:
+        view_ws_next(wm);
+        break;
     case ACT_SCRATCH_TOGGLE:
         scratch_toggle(wm);
         break;

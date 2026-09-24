@@ -150,6 +150,31 @@ view_ws(wm_t *wm, unsigned idx)
         focus_clear(wm);
 }
 
+/* Workspace traversal — step to the neighbouring workspace index
+ * (wrapping), landing on empty workspaces too. This is view movement,
+ * not client cycling: unlike the focus_* directions it never skips
+ * workspaces that have no windows, so every one of the nine is
+ * reachable. */
+void
+view_ws_prev(wm_t *wm)
+{
+    monitor_t *m = focused_mon(wm);
+
+    if (!m)
+        return;
+    view_ws(wm, m->ws_visible == 0 ? WS_MAX - 1 : m->ws_visible - 1);
+}
+
+void
+view_ws_next(wm_t *wm)
+{
+    monitor_t *m = focused_mon(wm);
+
+    if (!m)
+        return;
+    view_ws(wm, m->ws_visible + 1 == WS_MAX ? 0 : m->ws_visible + 1);
+}
+
 void
 send_client_to_ws(wm_t *wm, client_t *c, unsigned idx)
 {
