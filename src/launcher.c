@@ -880,12 +880,18 @@ launcher_enter(wm_t *wm, const char *input, const char *row)
             if (!rows[i].label || strcmp(rows[i].label, row))
                 continue;
 
-            /* desktop entry: launch its sanitized Exec */
+            /* desktop entry: launch its sanitized Exec, wrapped in the
+             * terminal only when Terminal=true; de->exec stays owned by
+             * the de_t, so the direct spawn needs no copy. */
             if (rows[i].de) {
-                char *cmd = exec_terminal(rows[i].de->exec);
+                if (rows[i].de->term) {
+                    char *cmd = exec_terminal(rows[i].de->exec);
 
-                spawn_shell(cmd);
-                free(cmd);
+                    spawn_shell(cmd);
+                    free(cmd);
+                } else {
+                    spawn_shell(rows[i].de->exec);
+                }
                 hist_push(rows[i].de->name);
                 return false;
             }
