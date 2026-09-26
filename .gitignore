@@ -3,3 +3,4 @@ austere
 *.d
 contrib/austere-cmd
 scripts/__pycache__/
+.slim/deepwork/
