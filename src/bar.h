@@ -59,6 +59,11 @@ void bars_sync(wm_t *wm); /* topology changed: create/resize/destroy */
 void bar_render(wm_t *wm, monitor_t *mon);
 void bar_render_all(wm_t *wm);
 void bar_expose(wm_t *wm, xcb_window_t win);
+/* Bar window coordinates -> root coordinates, for the modules that hand
+ * a press position to a protocol (the tray's Activate x/y). The bar
+ * keeps the origin formula private; this is the only way out. */
+void bar_root_point(const monitor_t *mon, int wx, int wy, int *root_x,
+    int *root_y);
 Rect mon_workarea(const monitor_t *m);
 int bar_timeout_ms(wm_t *wm);
 bool bar_button(wm_t *wm, xcb_window_t win, int x, unsigned btn);

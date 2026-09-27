@@ -14,6 +14,7 @@
 #include "menu.h"
 #include "module.h"
 #include "popup.h"
+#include "tray.h"
 #include "util.h"
 #include "workspace.h"
 
@@ -23,11 +24,13 @@
 #define LOGO_PAD 4
 
 /* Default placement; [bar] modules_left/center/right override each
- * group individually (SPEC §6.4). */
+ * group individually (SPEC §6.4). The tray leads the right group: it
+ * reads as part of the bar's own furniture rather than as a module the
+ * user had to ask for, and it costs nothing while it is empty. */
 static const char *DEFAULT_LEFT[] = { "workspaces", "layout", NULL };
 static const char *DEFAULT_CENTER[] = { "title", NULL };
-static const char *DEFAULT_RIGHT[] = { "cpu", "ram", "battery", "volume",
-    "clock", NULL };
+static const char *DEFAULT_RIGHT[] = { "tray", "cpu", "ram", "battery",
+    "volume", "clock", NULL };
 
 font_t *
 bar_font(wm_t *wm, module_t *m)
@@ -252,19 +255,43 @@ mon_workarea(const monitor_t *m)
     return r;
 }
 
+/* The bar window's origin in root coordinates - the single place that
+ * knows it. Placement, the tray's root coordinates and the hit-test all
+ * read it, so a press can never be translated differently from the way
+ * the window was put on screen. */
+static void
+bar_origin(const monitor_t *m, int *ox, int *oy)
+{
+    *ox = m->geom.x + (int)cfg.bar_gap;
+    *oy = cfg.bar_bottom
+        ? m->geom.y + (int)m->geom.h - (int)m->bar->height - (int)cfg.bar_gap
+        : m->geom.y + (int)cfg.bar_gap;
+}
+
+void
+bar_root_point(const monitor_t *mon, int wx, int wy, int *root_x, int *root_y)
+{
+    int ox, oy;
+
+    bar_origin(mon, &ox, &oy);
+    if (root_x)
+        *root_x = ox + wx;
+    if (root_y)
+        *root_y = oy + wy;
+}
+
 static void
 bar_create_window(wm_t *wm, monitor_t *mon)
 {
     bar_t *b = mon->bar;
     font_t *f = draw_ui_font(wm);
+    int ox, oy;
 
     b->height = font_height(f) + 2 * BAR_HEIGHT_PAD;
-    int by = cfg.bar_bottom
-        ? (int)(mon->geom.y + mon->geom.h - b->height - cfg.bar_gap)
-        : (int)(mon->geom.y + cfg.bar_gap);
+    bar_origin(mon, &ox, &oy);
     b->win = xcb_generate_id(wm->conn);
     xcb_create_window(wm->conn, XCB_COPY_FROM_PARENT, b->win,
-        wm->scr->root, (int16_t)(mon->geom.x + cfg.bar_gap), (int16_t)by,
+        wm->scr->root, (int16_t)ox, (int16_t)oy,
         (uint16_t)(mon->geom.w - 2 * cfg.bar_gap), (uint16_t)b->height, 0,
         XCB_WINDOW_CLASS_INPUT_OUTPUT, XCB_COPY_FROM_PARENT,
         XCB_CW_OVERRIDE_REDIRECT | XCB_CW_BACK_PIXEL |
@@ -302,10 +329,14 @@ bars_sync(wm_t *wm)
         bar_t *b = m->bar;
         b->height = font_height(draw_ui_font(wm)) +
             2 * BAR_HEIGHT_PAD;
-        int by = cfg.bar_bottom
-            ? (int)(m->geom.y + m->geom.h - b->height - cfg.bar_gap)
-            : (int)(m->geom.y + cfg.bar_gap);
-        uint32_t vals[] = { (uint32_t)(m->geom.x + cfg.bar_gap), (uint32_t)by,
+        /* The tray's icons are the bar's inner height, so the one place
+         * that establishes the bar height also tells the backend what to
+         * decode - here, never inside a render. */
+        tray_set_icon_size(wm, font_height(draw_ui_font(wm)));
+        int ox, oy;
+
+        bar_origin(m, &ox, &oy);
+        uint32_t vals[] = { (uint32_t)ox, (uint32_t)oy,
             (uint32_t)(m->geom.w - 2 * cfg.bar_gap), b->height };
 
         if (b->win == XCB_NONE)
@@ -544,6 +575,21 @@ bar_timeout_ms(wm_t *wm)
     return tick;
 }
 
+/* A press inside a module. Button 3 is the bar's global settings menu
+ * (§6.4) unless the module claims it: the tray needs it, because there
+ * the button is the item's own context menu, not ours. */
+static void
+mod_press(wm_t *wm, monitor_t *mon, module_t *m, int x, int px,
+    unsigned btn, const mod_reg_t *reg)
+{
+    if (btn == XCB_BUTTON_INDEX_3 && !mod_owns_right_click(reg)) {
+        menu_open(wm);
+        return;
+    }
+    if (reg && reg->click)
+        reg->click(wm, mon, m, x, px, btn);
+}
+
 bool
 bar_button(wm_t *wm, xcb_window_t win, int px, unsigned btn)
 {
@@ -575,10 +621,7 @@ bar_button(wm_t *wm, xcb_window_t win, int px, unsigned btn)
             if (!first)
                 x += (int)BAR_PAD;
             if (px >= x && px < x + (int)(w + BAR_PAD)) {
-                if (btn == XCB_BUTTON_INDEX_3)
-                    menu_open(wm); /* §6.4: right-click = settings */
-                else if (reg && reg->click)
-                    reg->click(wm, m, mod, x, px - x, btn);
+                mod_press(wm, m, mod, x, px - x, btn, reg);
                 return true;
             }
             x += (int)w + (int)BAR_PAD;
@@ -607,10 +650,7 @@ bar_button(wm_t *wm, xcb_window_t win, int px, unsigned btn)
                 if (!first)
                     x += (int)BAR_PAD;
                 if (px >= x && px < x + (int)(widths[i] + BAR_PAD)) {
-                    if (btn == XCB_BUTTON_INDEX_3)
-                        menu_open(wm);
-                    else if (reg && reg->click)
-                        reg->click(wm, m, mod, x, px - x, btn);
+                    mod_press(wm, m, mod, x, px - x, btn, reg);
                     return true;
                 }
                 x += (int)widths[i] + (int)BAR_PAD;
@@ -639,10 +679,7 @@ bar_button(wm_t *wm, xcb_window_t win, int px, unsigned btn)
             if (!first)
                 x += (int)BAR_PAD;
             if (px >= x && px < x + (int)(rw[i] + BAR_PAD)) {
-                if (btn == XCB_BUTTON_INDEX_3)
-                    menu_open(wm);
-                else if (reg && reg->click)
-                    reg->click(wm, m, mod, x, px - x, btn);
+                mod_press(wm, m, mod, x, px - x, btn, reg);
                 return true;
             }
             x += (int)rw[i] + (int)BAR_PAD;

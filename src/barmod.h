@@ -18,5 +18,9 @@ typedef struct {
 
 extern const mod_reg_t *const bar_module_reg[];
 const mod_reg_t *mod_lookup(const char *type);
+/* True when the row handles button 3 itself, so the bar does not turn
+ * the press into the global settings menu (§6.4). A NULL reg - a script
+ * module - never claims it. */
+bool mod_owns_right_click(const mod_reg_t *reg);
 
 #endif

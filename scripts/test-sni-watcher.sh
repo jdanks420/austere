@@ -50,9 +50,12 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # ---- private X display ------------------------------------------------
+# Display numbers are split with scripts/test-tray-ui.sh (110-129) so a
+# concurrent `make -j test` cannot have the two harnesses race for the
+# same free socket. Sockets are still scanned for a free one first.
 DISP=""
 n=90
-while [ "$n" -lt 130 ]; do
+while [ "$n" -lt 110 ]; do
     if [ ! -e "/tmp/.X11-unix/X$n" ]; then
         Xvfb ":$n" -screen 0 1024x768x24 -nolisten tcp \
             >"$TMP/xvfb.log" 2>&1 &
