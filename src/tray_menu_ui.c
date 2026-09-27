@@ -202,50 +202,112 @@ tm_row_at(const layout_t *L, int wy, unsigned *row)
 
 /* ---- painting --------------------------------------------------------- */
 
-/* Premultiplied source over an opaque menu pixel, clamped: the tray's
- * IconPixmap path delivers straight alpha, so the invariant is not ours
- * to rely on. (The bar module carries its own copy of this; sharing it
- * would mean reaching into draw.c, which is not this file's to change.) */
-static unsigned
-tm_over(unsigned src, unsigned bg, unsigned a)
+/* ---- compositing ------------------------------------------------------
+ *
+ * image_t.argb is STRAIGHT (unassociated) ARGB32: A in bits 24..31, then
+ * R, G, B, and a pixel with A == 0 carries no colour at all. Both sources
+ * that reach this surface agree on that, which is worth measuring rather
+ * than assuming:
+ *   - the Imlib2 theme decode hands over straight alpha. hicolor's
+ *     caffeine-cup-empty stores RGB 255,255,255 under every fully
+ *     transparent pixel, which is what a PNG with an RGB channel kept
+ *     beside an empty alpha looks like,
+ *   - an SNI IconPixmap is network-order ARGB32 on the wire, and the
+ *     backend copies those bytes through verbatim.
+ * Reading either as premultiplied paints every transparent pixel with the
+ * source's own colour - white, for a theme icon - which is the white box
+ * that used to sit behind every tray glyph.
+ *
+ * So there is one formula, and an exact-size blit is its 1x1 degenerate
+ * rather than a second path that can drift from the first. For the box of
+ * source pixels that map to one destination pixel, average in
+ * PREMULTIPLIED space - the mean of r*a, g*a and b*a, and the mean of a -
+ * so a transparent pixel contributes no colour to its neighbours, and
+ * composite that over the bar ground:
+ *
+ *   out = (sum(r*a)/n + ground * (255 - sum(a)/n) + 127) / 255, clamped
+ *
+ * A == 0 lands exactly on the ground, A == 255 exactly on the source, and
+ * a half-transparent pixel half way between the two. `tint` replaces the
+ * source's own colour (0 keeps it), which is how an inert row keeps an
+ * icon's silhouette but loses its colour in the tray menu; the bar never
+ * dims, and a dim tone is never black.
+ *
+ * The sums are bounded by the box, i.e. the source pixel count behind one
+ * destination pixel: a tray source is at most 512px and the box a few
+ * hundred pixels at most, so a 32-bit accumulator cannot wrap. */
+static uint32_t
+composite_pixel(const image_t *im, unsigned dx, unsigned dw, unsigned dy,
+    unsigned dh, uint32_t ground, uint32_t tint)
 {
-    src += (bg * (255 - a) + 127) / 255;
-    return src > 255 ? 255 : src;
+    unsigned x0 = dx * im->w / dw, y0 = dy * im->h / dh;
+    unsigned x1 = ((dx + 1) * im->w + dw - 1) / dw;
+    unsigned y1 = ((dy + 1) * im->h + dh - 1) / dh;
+    uint32_t aa = 0, ar = 0, ag = 0, ab = 0, n = 0;
+    uint32_t gr = (ground >> 16) & 0xff, gg = (ground >> 8) & 0xff,
+        gb = ground & 0xff, av, pr, pg, pb, orr, ogg, obb;
+
+    if (x1 <= x0)
+        x1 = x0 + 1;
+    if (y1 <= y0)
+        y1 = y0 + 1;
+    if (x1 > im->w)
+        x1 = im->w;
+    if (y1 > im->h)
+        y1 = im->h;
+    for (uint32_t y = y0; y < y1; y++)
+        for (uint32_t x = x0; x < x1; x++) {
+            uint32_t p = im->argb[(size_t)y * im->w + x];
+            uint32_t a = p >> 24;
+
+            /* premultiplied on the way in: a transparent pixel carries no
+             * colour into the average */
+            aa += a;
+            ar += a * ((p >> 16) & 0xff);
+            ag += a * ((p >> 8) & 0xff);
+            ab += a * (p & 0xff);
+            n++;
+        }
+    if (!n)
+        return 0xff000000u | ground;      /* no source pixel: the ground */
+    av = aa / n;
+    if (tint) {
+        pr = ((tint >> 16) & 0xff) * av;
+        pg = ((tint >> 8) & 0xff) * av;
+        pb = (tint & 0xff) * av;
+    } else {
+        pr = ar / n;
+        pg = ag / n;
+        pb = ab / n;
+    }
+    uint32_t through = 255 - av;
+
+    orr = (pr + gr * through + 127) / 255;
+    ogg = (pg + gg * through + 127) / 255;
+    obb = (pb + gb * through + 127) / 255;
+    if (orr > 255)
+        orr = 255;
+    if (ogg > 255)
+        ogg = 255;
+    if (obb > 255)
+        obb = 255;
+    return 0xff000000u | orr << 16 | ogg << 8 | obb;
 }
 
-/* One row icon, composited onto the menu ground before the blit:
- * draw_put_image24 drops the alpha byte, so a straight blit would print
- * every transparent pixel as a black block. Nearest sampling is enough at
- * this size - the bar module area-averages because its icons are the
- * focus there, and they are three times the size.
- *
- * An inert row keeps its icon but loses its colour: it is composited in
- * the row's own dim tone, so a disabled row reads as one thing instead of
- * a dim label beside a live-looking icon. */
+/* One row icon, composited over the menu ground. An inert row keeps its
+ * icon's silhouette but loses its colour: `tint` is the row's dim tone,
+ * so a disabled row reads as one thing instead of a dim label beside a
+ * live-looking icon. */
 static void
 tm_icon(wm_t *wm, const image_t *im, int x, int y, unsigned w, unsigned h,
     bool dim, uint32_t tint)
 {
     uint32_t buf[TM_ICON_MAX * TM_ICON_MAX];
-    uint32_t bg = cfg.bar_bg, br = (bg >> 16) & 0xff, bgn = (bg >> 8) & 0xff,
-        bb = bg & 0xff;
 
     for (unsigned dy = 0; dy < h; dy++)
-        for (unsigned dx = 0; dx < w; dx++) {
-            uint32_t s = im->argb[(size_t)(dy * im->h / h) * im->w +
-                (dx * im->w / w)];
-            unsigned a = s >> 24;
-
-            if (!a)
-                s = 0;      /* fully transparent: the ground, whatever the
-                             * source left behind in the colour channels */
-            else if (dim)
-                s = (s & 0xff000000u) | (tint & 0xffffff);
-            buf[(size_t)dy * w + dx] = 0xff000000u |
-                tm_over(s >> 16 & 0xff, br, a) << 16 |
-                tm_over(s >> 8 & 0xff, bgn, a) << 8 |
-                tm_over(s & 0xff, bb, a);
-        }
+        for (unsigned dx = 0; dx < w; dx++)
+            buf[(size_t)dy * w + dx] = composite_pixel(im, dx, w, dy, h,
+                cfg.bar_bg, dim ? tint : 0);
     draw_put_image24(wm, win, draw.gc, draw.depth, (int16_t)x, (int16_t)y, w,
         h, buf);
 }

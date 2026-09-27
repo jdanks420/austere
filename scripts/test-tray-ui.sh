@@ -132,15 +132,34 @@ ITEMS = [
 
 
 def pixmap(size):
+    """A square with an opaque amber centre and a 3 px transparent border.
+
+    The transparent border deliberately carries WHITE in its colour
+    channels under a zero alpha. That is what a theme PNG does - hicolor's
+    own caffeine-cup-empty stores rgb 255,255,255 under every fully
+    transparent pixel - and it is the case the bar compositor used to get
+    wrong: read as premultiplied, a zero-alpha pixel paints as its own
+    colour, so the whole border came out as a white box. IconPixmap is
+    straight alpha too, so this fixture reproduces it without a theme
+    lookup."""
+    # IconPixmap bytes are ARGB32 in network order, so the FIRST byte is
+    # the alpha. The centre is opaque amber (ff e0 90 30) and the border is
+    # 00 ff ff ff: alpha 0 with WHITE in the colour channels.
     px = b""
     for y in range(size):
         for x in range(size):
             if 3 <= x < size - 3 and 3 <= y < size - 3:
-                px += bytes((0xE0, 0x90, 0x30, 0xFF))    # opaque ARGB
+                px += bytes((0xFF, 0xE0, 0x90, 0x30))    # the amber centre
             else:
-                px += bytes((0, 0, 0, 0))               # transparent
+                px += bytes((0x00, 0xFF, 0xFF, 0xFF))   # alpha 0, WHITE
     return GLib.Variant("(iiay)", (size, size, GLib.Variant("ay", px)))
 
+
+# Item A offers a 16px square, so the host blits it at the bar's own icon
+# box (the 1x1 path). Item B offers only a 32px square, so the host has to
+# downscale it to the same box (the box-filter path). Both cells stay
+# 16 px wide, so no layout assertion below moves.
+SIZES = {"A": (22, 16), "B": (32,)}
 
 PROPS = ["Category", "Id", "Title", "Status", "IconName",
          "AttentionIconName", "ItemIsMenu", "Menu", "IconPixmap"]
@@ -200,7 +219,7 @@ def values(tag):
         "ItemIsMenu": GLib.Variant("b", False),
         "Menu": GLib.Variant("o", "/MenuBar"),
         "IconPixmap": GLib.Variant("a(iiay)",
-                                   (pixmap(22), pixmap(16))),
+                                   tuple(pixmap(n) for n in SIZES[tag])),
     }
 
 
@@ -617,6 +636,64 @@ else
     bad "sweep did not find both cells (A=${HIT_A:-none} B=${HIT_B:-none})"
     sed -n '1,40p' "$LOG"
     exit 1
+fi
+
+# ---- icon transparency (regression) ------------------------------------
+# A tray icon's transparent border must land on the bar's own ground, and
+# the icon itself must still be drawn.
+#
+# The assertion is taken over a band of the bar rather than over one cell,
+# and deliberately so: the strip's cells move whenever a numeric module
+# beside them changes width (a CPU percentage gaining a digit shifts every
+# cell to its left), so pinning a cell's x would make this flaky rather
+# than strict. The band starts past the logo - the only other thing in the
+# bar that can be pure white, since it is drawn in the logo's white variant
+# over this dark ground - and runs to the bar's right edge, where the tray
+# is right-anchored. Everything else the bar paints is bar_fg (#cccccc),
+# BAR_DIM (#777777) or focus_color (#5f819d), none of which is #ffffff, so
+# a white pixel in that band can only have come from an icon.
+#
+# The ground is the 1a1a1a this script's own throwaway config sets above.
+GROUND=1A1A1A
+BAND_X=$((BX + 64))
+BAND_W=$((BW - 64 - 8))
+xwd -id "$BAR" -out "$TMP/cells.xwd" 2>/dev/null
+convert "$TMP/cells.xwd" -crop "${BAND_W}x${BH}+${BAND_X}+0" +repage \
+    "$TMP/band.png" 2>/dev/null
+BAND=$(convert "$TMP/band.png" -depth 8 txt:- 2>/dev/null | awk -v g="$GROUND" '
+    NR > 1 {
+        split($0, a, "#")
+        hex = toupper(a[2])
+        sub(/ .*/, "", hex)
+        r = strtonum("0x" substr(hex, 1, 2))
+        gg = strtonum("0x" substr(hex, 3, 2))
+        b = strtonum("0x" substr(hex, 5, 2))
+        n++
+        if (hex == "FFFFFF") white++
+        if (hex == g) ground++
+        # the fixture'"'"'s own opaque colour, and its antialiased blends
+        if (r >= 0xC0 && gg >= 0x60 && b <= 0x60) ink++
+    }
+    END { printf "%d %d %d %d", white + 0, ground + 0, ink + 0, n }')
+set -- $BAND
+BAND_WHITE=${1:-0}
+BAND_GROUND=${2:-0}
+BAND_INK=${3:-0}
+BAND_TOTAL=${4:-0}
+if [ "$BAND_WHITE" -eq 0 ]; then
+    ok "no transparent pixel of an icon came out as white ($BAND_WHITE in the bar band)"
+else
+    bad "$BAND_WHITE white pixel(s) in the bar band: an icon's transparent border is painting its own colour"
+fi
+if [ "$BAND_INK" -gt 0 ]; then
+    ok "the icons themselves are still drawn ($BAND_INK pixel(s) of icon colour)"
+else
+    bad "no icon colour anywhere in the band: the icons did not draw"
+fi
+if [ "$BAND_GROUND" -gt 0 ]; then
+    ok "the icon cells let the bar ground through ($BAND_GROUND of $BAND_TOTAL band pixels)"
+else
+    bad "no bar ground in the band: the icon cells painted over everything"
 fi
 
 # one press, one assertion, on the left cell
