@@ -12,9 +12,11 @@
  *
  * Presentation only. The backend owns the registry, the item order, the
  * pixels and every wire call; this file reads tray_view() and dispatches
- * tray_click() / tray_scroll(). No D-Bus here, not even indirectly: the
- * event loop owns the bus and turns the backend's render flag into at
- * most one repaint, so a render here can never recurse.
+ * tray_click() / tray_scroll(), plus tray_menu_open() for the two buttons
+ * that can ask an item for its own menu (§7.6.1). No D-Bus here, not even
+ * indirectly: the event loop owns the bus, the menu exchange belongs to
+ * the backend, and the backend turns its render flag into at most one
+ * repaint, so a render here can never recurse.
  *
  * Layout, all of it decided in tray_layout() so measure, draw and
  * hit-test cannot disagree:
@@ -39,6 +41,7 @@ typedef struct {
     unsigned off;          /* x from the module origin */
     unsigned w;            /* drawn width, aspect kept */
     const image_t *img;    /* NULL: the placeholder is drawn instead */
+    const tray_item_t *item;  /* the snapshot row this cell draws */
 } cell_t;
 
 /* Per-bar scratch: one composited icon, reused along the strip.
@@ -108,6 +111,7 @@ tray_layout(wm_t *wm, monitor_t *mon, cell_t *cells)
         cells[n].off = off;
         cells[n].w = w;
         cells[n].img = has ? im : NULL;
+        cells[n].item = it;
         acc = right;
         n++;
     }
@@ -259,18 +263,24 @@ traymod_render(wm_t *wm, monitor_t *mon, module_t *m, int x, bool draw)
 /* Buttons 1/2/3 are Activate / SecondaryActivate / ContextMenu; 4/5 and
  * 6/7 are the wheel pairs, vertical and horizontal. The backend picks
  * the member and resolves the snapshot index, so this handler only maps
- * a button onto a cell.
+ * a button onto a cell - and, for the two buttons that can open the
+ * item's own menu, onto a menu request.
  *
  * Button 3 reaches us because the tray row claims it
- * (mod_owns_right_click); there is no in-Austere menu in this phase -
- * the item is asked to show its own, and the popup arrives with the
- * DBusMenu work. */
+ * (mod_owns_right_click). The item's own menu (SPEC §7.6.1) is asked for
+ * first, and the popup arrives with the backend's LOADING -> READY
+ * exchange; a tray_menu_open() that returns false has already been
+ * answered by the backend (ContextMenu for an item with no usable
+ * internal menu, and a no-op when the index or the bus is gone, where
+ * tray_click() below would be inert too), so the press is never answered
+ * twice. */
 static void
 traymod_click(wm_t *wm, monitor_t *mon, module_t *m, int mod_x, int px,
     unsigned btn)
 {
     cell_t cells[TRAY_MAX_ITEMS];
     unsigned n = tray_layout(wm, mon, cells), hit;
+    const tray_item_t *it;
 
     (void)m;                 /* a press needs no instance state */
     if (!n)
@@ -285,6 +295,7 @@ traymod_click(wm_t *wm, monitor_t *mon, module_t *m, int mod_x, int px,
             hit = i;
             break;
         }
+    it = cells[hit].item;
     switch (btn) {
     case XCB_BUTTON_INDEX_1:
     case XCB_BUTTON_INDEX_2:
@@ -297,6 +308,14 @@ traymod_click(wm_t *wm, monitor_t *mon, module_t *m, int mod_x, int px,
          * where a host would place the item's menu anyway. */
         bar_root_point(mon, mod_x + px,
             tray_icon_y(mon, box) + (int)box / 2, &rx, &ry);
+        /* ItemIsMenu means the icon is nothing but its menu; any other
+         * item with a menu keeps Activate on button 1 and offers the menu
+         * on button 3, as the spec's own table says. */
+        if ((btn == XCB_BUTTON_INDEX_1 && it->is_menu) ||
+            (btn == XCB_BUTTON_INDEX_3 && it->menu_path && *it->menu_path)) {
+            tray_menu_open(hit, rx, ry);
+            return;
+        }
         tray_click(hit, btn, rx, ry);
         return;
     }

@@ -36,15 +36,23 @@ than purity of the *workflow*.
 2. **Two frontends, one backend.** The settings menu and `austere.conf` are
    equally complete views over the same `Settings` struct (SPEC §9.4).
    Neither is second-class; a setting missing from either frontend is a bug.
-3. **Dependencies are radioactive.** libxcb family only — with three named,
+3. **Dependencies are radioactive.** libxcb family only — with four named,
    justified exceptions: `xcb-shape` (rounded corners), `fontconfig` +
    `freetype` (text rasterization only; plain C, no Xlib/Xft, no cairo/
-   pango), and `imlib2`
+   pango), `imlib2`
    (wallpaper thumbnails only; already required by the mandated feh setter,
-   build-omittable via `AUSTERE_NO_IMLIB2`). A feature needing anything
+   build-omittable via `AUSTERE_NO_IMLIB2`), and `libdbus`
+   (the session-bus services: `org.freedesktop.Notifications` and the
+   StatusNotifierItem host — build-omittable via `AUSTERE_NO_DBUS`).
+   libdbus is the accepted price of *owning* bus names: it was already
+   linked for the notification service, so the tray reuses that one
+   library rather than dragging in GObject/GDBus, a notification daemon, or
+   a separate tray process to do the same job. A feature needing anything
    else gets redesigned or dropped.
 4. **Flat beats clever.** One thread, one `poll()` loop, no abstraction
-   layers that exist "for later."
+   layers that exist "for later." The tray takes it literally — its own
+   single bus connection, no threads, no blocking calls, a flat item menu,
+   and no legacy XEmbed support (SPEC §7.6).
 5. **Small enough to hold in your head.** Per-module size discipline;
    layouts are self-contained single files; deleting any one file must
    suggest where its logic lived.
@@ -70,6 +78,7 @@ than purity of the *workflow*.
 | No remote control on principle | Command socket over the action registry | Scriptability costs zero WM logic paths |
 | Launcher/menu = external process (dmenu) | Built-in panels | Fewer processes and zero RAM overhead on old hardware; same primitives |
 | Status = root window name only | Modular bar: built-ins + process-boundary user scripts (root-name mode kept for dwm compat) | Full customization without embedding an interpreter |
+| Tray icons are somebody else's problem — a `stalonetray`-style helper owns the bus name | Austere *is* the StatusNotifierItem host: it owns `org.kde.StatusNotifierWatcher` and renders SNI/AppIndicator items in the bar itself | A system tray is a shell feature, not a service to install; no extra process, no extra panel, and the existing libdbus link already pays for it (SPEC §7.6) |
 | Compositing: out of scope, unaddressed | Explicit host-agnostic contract (SPEC §5.8): any user compositor or none | Users keep free choice of compositor/version; austere never fights it |
 | Xlib | libxcb | Lower latency, smaller footprint |
 

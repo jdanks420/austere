@@ -26,10 +26,14 @@
 # empty collapse, both cells found by sweep, button 1/2/3 with the press
 # point in root coordinates, and the 4/5 and 6/7 scroll pairs.
 #
-# Phase B (real-app acceptance, evidence only, never a hard gate): the
-# installed caffeine/caffeine-ng is started on the private display and
-# must register and cause a bar repaint. A missing app is reported as an
-# explicit ACCEPTANCE BLOCKED line, not as a pass.
+# Phase B (real-app acceptance): the installed caffeine/caffeine-ng is
+# started on the private display and must register, cause a bar repaint,
+# resolve its themed icon, open a real popup with rows, and have a real
+# Quit row that ends it. Every one of those is a hard gate, because a real
+# client is the only place the protocol is not our own fixture. Only a
+# missing app, or one that cannot run on this display at all, is reported
+# as an explicit ACCEPTANCE BLOCKED line - never a pass, and never an
+# excuse for a menu that answered with nothing.
 #
 # Usage: scripts/test-tray-ui.sh [path-to-austere]
 #
@@ -47,7 +51,8 @@ case "$BIN" in
 esac
 
 missing=
-for tool in Xvfb dbus-run-session dbus-send xdotool xwininfo xwd convert awk; do
+for tool in Xvfb dbus-run-session dbus-send dbus-monitor xdotool xwininfo \
+    xwd convert awk; do
     command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
 done
 python3 -c "import gi; gi.require_version('Gio', '2.0')" >/dev/null 2>&1 ||
@@ -262,6 +267,7 @@ WM_PID=""
 ITEM_PID=""
 ITEM0_PID=""
 APP_PID=""
+MON_PID=""
 
 ok()   { PASS=$((PASS + 1)); echo "  ok   $*"; }
 bad()  { FAIL=$((FAIL + 1)); echo "  FAIL $*"; }
@@ -292,6 +298,14 @@ stop_app() {
     return 0
 }
 
+stop_monitor() {
+    [ -n "${MON_PID:-}" ] || return 0
+    kill "$MON_PID" 2>/dev/null || true
+    wait "$MON_PID" 2>/dev/null || true
+    MON_PID=""
+    return 0
+}
+
 stop_item() {
     [ -n "$ITEM_PID" ] || return 0
     kill_bounded "$ITEM_PID" "fake item"
@@ -306,15 +320,29 @@ stop_item0() {
     return 0
 }
 
-# Every background process this phase starts, killed on any exit path.
+# Every background process this phase starts, killed on any exit path. The
+# wm gets the same bounded stop as the fakes: a phase that fails an
+# assertion must not leave a wm holding the harness's X display, and a
+# wm that ignored SIGTERM would survive a plain kill as well.
 cleanup_here() {
     stop_app
     stop_item
     stop_item0
+    stop_monitor
     [ -n "$WM_PID" ] && kill -TERM "$WM_PID" 2>/dev/null
+    _t=0
+    while [ "$_t" -lt 30 ] && [ -n "$WM_PID" ] && kill -0 "$WM_PID" 2>/dev/null; do
+        sleep 0.1
+        _t=$((_t + 1))
+    done
+    [ -n "$WM_PID" ] && kill -9 "$WM_PID" 2>/dev/null
+    [ -n "$WM_PID" ] && wait "$WM_PID" 2>/dev/null
+    WM_PID=""
     return 0
 }
-trap cleanup_here EXIT INT TERM
+trap cleanup_here EXIT
+trap 'cleanup_here; exit 130' INT
+trap 'cleanup_here; exit 143' TERM
 
 items() {
     dbus-send --session --print-reply --reply-timeout=4000 \
@@ -365,8 +393,47 @@ changed_pixels() {
         -threshold 1% -format "%[fx:mean*w*h]" info: 2>/dev/null
 }
 
+# The popup is the one viewable root child that is popup-sized and sits
+# near the cell that was pressed. X reuses window ids after a destroy, so a
+# before/after diff would miss a popup that reopened with the same id.
+find_popup_near() {   # find_popup_near <cell-x>
+    xwininfo -root -tree 2>/dev/null | awk -v cx="$1" '
+        /^[[:space:]]+0x/ {
+            if (!match($0, /[0-9]+x[0-9]+\+[0-9-]+\+[0-9-]+/)) next
+            g = substr($0, RSTART, RLENGTH)
+            split(g, d, /[x+]/)
+            w = d[1] + 0; h = d[2] + 0; x = d[3] + 0
+            if (w < 20 || w > 600) next
+            if (h < 20) next
+            if (x < cx - 40 || x > cx + 600) next
+            print $1
+            exit
+        }'
+}
+
+win_field() {   # win_field <id> <x|y|w|h>
+    xwininfo -id "$1" 2>/dev/null | awk -v want="$2" '
+        /Absolute upper-left X/ { for (i = 1; i <= NF; i++) if ($i == "X:") x = $(i + 1) }
+        /Absolute upper-left Y/ { for (i = 1; i <= NF; i++) if ($i == "Y:") y = $(i + 1) }
+        /Width:/  { w = $2 }
+        /Height:/ { h = $2 }
+        END { print want == "x" ? x : want == "y" ? y : want == "w" ? w : h }'
+}
+
 press() {   # press <x> <y> <button>
     xdotool mousemove "$1" "$2" click "$3" 2>/dev/null
+}
+
+# The ids of every clicked() event the wm sent to the real client, read back
+# from the monitor. A method call block is member=Event, the line after it is
+# the int32 id and the one after that the event name, so an id is only taken
+# when its own block says "clicked".
+clicked_ids() {
+    [ -s "$TMP/app-monitor.txt" ] || return 0
+    awk '/member=Event/ { id = ""
+           if ((getline line) > 0 && line ~ /int32/) id = line
+           if ((getline line) > 0 && line ~ /clicked/) print id }' \
+        "$TMP/app-monitor.txt" | tr -s ' ' | sed 's/^ //;s/int32 //'
 }
 
 wait_items() {   # wait_items <count> <deciseconds>
@@ -502,8 +569,48 @@ echo "-- cells and press coordinates"
 # bar's layout maths; cells keep the backend's order, so A is left of B.
 HIT_A=""; HIT_B=""
 sweep 4 25
-HIT_A=$SWEEP_A
-HIT_B=$SWEEP_B
+# The sweep's first hit is a cell's rightmost pixel, one step from the
+# boundary with its neighbour, so both cells are then walked inwards to an
+# interior point. That matters because the strip's cells move whenever a
+# numeric module beside them changes width - a CPU percentage gaining a
+# digit shifts every cell to its left - and a boundary pixel is then
+# answered by the other item. find_cell only ever returns an x the wanted
+# item answered for, so every later press is known to be inside it.
+find_cell() {   # find_cell <A|B> <from-x> <direction> -> interior x
+    _want=$1; _x=$2; _dir=$3; _d=0
+    while [ "$_d" -lt 12 ]; do
+        : >"$SNI_MARK"
+        press "$_x" "$Y" 1
+        sleep 0.2
+        case "$(head -1 "$SNI_MARK" 2>/dev/null)" in
+        "$_want Activate "*) echo "$_x"; return 0 ;;
+        esac
+        _x=$((_x + _dir * 2))
+        _d=$((_d + 1))
+    done
+    return 1
+}
+HIT_A=$(find_cell A "${SWEEP_A:-0}" -1) || HIT_A=${SWEEP_A:-}
+HIT_B=$(find_cell B "${SWEEP_B:-0}" 1) || HIT_B=${SWEEP_B:-}
+# A press on a cell the strip moved out from under, answered with the
+# method the wanted item received: the walk is what keeps the assertions
+# below about the method rather than about a module's width at one instant.
+press_in() {   # press_in <A|B> <x> <button> -> the answered line on stdout
+    _want=$1; _x=$2; _btn=$3; _d=0
+    while [ "$_d" -lt 8 ]; do
+        : >"$SNI_MARK"
+        press "$_x" "$Y" "$_btn"
+        sleep 0.3
+        _line=$(head -1 "$SNI_MARK" 2>/dev/null)
+        case "$_line" in
+        "$_want "*) echo "$_line"; return 0 ;;
+        esac
+        _x=$((_x - 2))
+        _d=$((_d + 1))
+    done
+    echo "${_line:-}"
+    return 1
+}
 if [ -n "$HIT_A" ] && [ -n "$HIT_B" ] && [ "$HIT_A" -lt "$HIT_B" ]; then
     ok "sweep found both cells (left x=$HIT_A, right x=$HIT_B)"
 else
@@ -513,10 +620,7 @@ else
 fi
 
 # one press, one assertion, on the left cell
-: >"$SNI_MARK"
-press "$HIT_A" "$Y" 1
-sleep 0.3
-LINE=$(head -1 "$SNI_MARK" 2>/dev/null)
+LINE=$(press_in A "$HIT_A" 1)
 GOTX=$(printf '%s' "$LINE" | awk '{ print $3 }')
 GOTY=$(printf '%s' "$LINE" | awk '{ print $4 }')
 case "$LINE" in
@@ -550,10 +654,7 @@ fi
 Y1=$GOTY
 
 # the right cell must resolve to the other item
-: >"$SNI_MARK"
-press "$HIT_B" "$Y" 1
-sleep 0.3
-LINE=$(head -1 "$SNI_MARK" 2>/dev/null)
+LINE=$(press_in B "$HIT_B" 1)
 case "$LINE" in
 "B Activate "*) ok "right cell press reached item B (per-cell index)" ;;
 *) bad "right cell press did not reach item B: [$LINE]" ;;
@@ -563,10 +664,7 @@ esac
 for spec in "2 SecondaryActivate" "3 ContextMenu"; do
     btn=${spec%% *}
     want=${spec#* }
-    : >"$SNI_MARK"
-    press "$HIT_A" "$Y" "$btn"
-    sleep 0.3
-    LINE=$(head -1 "$SNI_MARK" 2>/dev/null)
+    LINE=$(press_in A "$HIT_A" "$btn")
     case "$LINE" in
     "A $want $HIT_A $Y1") ok "button $btn reached $want with the press point" ;;
     *) bad "button $btn: got [$LINE], want [A $want $HIT_A $Y1]" ;;
@@ -578,10 +676,7 @@ for spec in "4 1 vertical" "5 -1 vertical" "6 -1 horizontal" "7 1 horizontal"; d
     btn=$(printf '%s' "$spec" | awk '{ print $1 }')
     delta=$(printf '%s' "$spec" | awk '{ print $2 }')
     orient=$(printf '%s' "$spec" | awk '{ print $3 }')
-    : >"$SNI_MARK"
-    press "$HIT_A" "$Y" "$btn"
-    sleep 0.3
-    LINE=$(head -1 "$SNI_MARK" 2>/dev/null)
+    LINE=$(press_in A "$HIT_A" "$btn")
     if [ "$LINE" = "A Scroll $delta $orient" ]; then
         ok "button $btn scrolled $delta $orient"
     else
@@ -606,6 +701,10 @@ fi
 stop_item0
 
 echo "-- phase B: real-app acceptance (caffeine)"
+# A hard gate when the environment can run it: the themed icon must resolve,
+# the real popup must open with rows, and a real Quit row must end the app.
+# Every step that cannot be reached here is reported as BLOCKED, which is
+# information, not a pass and not a failure of the tree.
 APP=""
 for candidate in caffeine caffeine-ng; do
     command -v "$candidate" >/dev/null 2>&1 && { APP=$candidate; break; }
@@ -613,7 +712,29 @@ done
 if [ -z "$APP" ]; then
     echo "  ACCEPTANCE BLOCKED: no caffeine/caffeine-ng on PATH"
 else
+    # the phase A fakes go first: one item means one cell, and the log
+    # assertions below can be scoped to the lines written after the real app
+    # started rather than catching the fakes' own IconPixmap fallback
+    stop_item
+    stop_item0
+    t=0
+    while [ "$t" -lt 60 ] && [ "$(items | wc -l)" -ne 0 ]; do
+        sleep 0.1
+        t=$((t + 1))
+    done
+    if [ "$(items | wc -l)" -ne 0 ]; then
+        echo "  ACCEPTANCE BLOCKED: the fake items did not unregister"
+    fi
+    LOGMARK=$(wc -l < "$LOG")
     xwd -id "$BAR" -out "$TMP/real-before.xwd" 2>/dev/null
+    # Watching the real client's menu traffic: it is the only witness to
+    # which row a press addressed, and the acceptance below is about what
+    # the client received, not about what the screen showed.
+    : >"$TMP/app-monitor.txt"
+    dbus-monitor --session "interface=com.canonical.dbusmenu" \
+        >"$TMP/app-monitor.txt" 2>&1 &
+    MON_PID=$!
+    sleep 0.4
     "$APP" >"$TMP/app.log" 2>&1 &
     APP_PID=$!
     t=0
@@ -626,12 +747,20 @@ else
         echo "  ACCEPTANCE BLOCKED: $APP exited on the private display:"
         sed -n '1,10p' "$TMP/app.log" | sed 's/^/    /'
         stop_app
+        stop_monitor
     elif [ "$(items | wc -l)" -eq 0 ]; then
-        # alive but invisible to the tray: report it, and never leave it
-        # running behind us
         echo "  ACCEPTANCE FAILED: $APP ran but registered no item"
         stop_app
+        stop_monitor
     else
+        # A child that has exited but has not been waited for is still a
+        # live pid, so `kill -0` alone reports an app that is long gone as
+        # still running. The registry is the honest test: the app is the
+        # only item here, so an empty registry means it unregistering.
+        app_gone() {
+            kill -0 "$APP_PID" 2>/dev/null || return 0
+            [ "$(items | wc -l)" -eq 0 ]
+        }
         ok "$APP registered: $(items | tr '\n' ' ')"
         sleep 1
         xwd -id "$BAR" -out "$TMP/real-after.xwd" 2>/dev/null
@@ -639,18 +768,153 @@ else
         if [ -n "$RPX" ] && [ "$RPX" -gt 0 ] 2>/dev/null; then
             ok "bar repainted when $APP registered ($RPX px differ; repaint evidence only)"
         else
-            echo "  ACCEPTANCE NOTE: $APP registered but the bar showed no repaint"
+            echo "  ACCEPTANCE FAILED: no bar repaint when $APP registered"
+        fi
+
+        # The acceptance case from the phase 3 contract: the themed icon
+        # must resolve, which the backend proves by NOT logging the no-icon
+        # line it writes for an icon it could not find.
+        tail -n "+$((LOGMARK + 1))" "$LOG" >"$TMP/app-wm.log" 2>/dev/null
+        if grep -q 'no icon for "caffeine-cup-empty"' "$TMP/app-wm.log"; then
+            bad "the themed caffeine icon did not resolve: $(grep -m1 'no icon for' "$TMP/app-wm.log")"
+        else
+            ok "the themed caffeine icon resolved (no no-icon log line)"
+        fi
+        if grep -q 'using IconPixmap' "$TMP/app-wm.log"; then
+            bad "caffeine fell back to its IconPixmap: $(grep -m1 'using IconPixmap' "$TMP/app-wm.log")"
+        else
+            ok "caffeine did not fall back to IconPixmap"
+        fi
+
+        # The real popup, from the real item, through the real event loop.
+        # A real app answers nothing to the marker file the fakes use, so
+        # its cell is found the way a user finds it: right-click along the
+        # strip until a popup appears.
+        RCELL=""
+        _lo=$((BX + BW * 25 / 100)); _x=$((BX + BW - 4))
+        while [ "$_x" -gt "$_lo" ]; do
+            press "$_x" "$Y" 3
+            sleep 0.4
+            _p=$(find_popup_near "$_x")
+            # a popup that is still there a moment later is a real one; a
+            # flash that is already gone was a failed exchange, not a hit
+            if [ -n "$_p" ]; then
+                sleep 0.6
+                if [ -n "$(find_popup_near "$_x")" ]; then
+                    RCELL=$_x
+                    RPOP0=$_p
+                    xdotool key --clearmodifiers Escape 2>/dev/null
+                    sleep 0.4
+                    break
+                fi
+            fi
+            # a tray cell is about twenty pixels wide, so a step of eight
+            # cannot miss one and the sweep stays quick
+            _x=$((_x - 8))
+        done
+        if [ -z "$RCELL" ]; then
+            bad "no $APP tray cell produced a popup; the app is running and its menu did not open"
+            echo "     what the backend said while $APP was up:"
+            sed -n '1,12p' "$TMP/app-wm.log" 2>/dev/null | sed 's/^/       /'
+        else
+            : >"$SNI_MARK"
+            press "$RCELL" "$Y" 3
+            RPOP=""
+            t=0
+            while [ "$t" -lt 60 ]; do
+                RPOP=$(find_popup_near "$RCELL")
+                [ -n "$RPOP" ] && break
+                sleep 0.1
+                t=$((t + 1))
+            done
+            # A hard gate, not an observation: an empty layout is a parser
+            # or layout failure, and it is exactly the shape a real client
+            # used to answer in, so it may never be reported as BLOCKED.
+            if grep -q 'no rows to show' "$TMP/app-wm.log" 2>/dev/null; then
+                bad "$APP's GetLayout answer was rejected as empty:"
+                grep -m2 'no rows to show' "$TMP/app-wm.log" | sed 's/^/     /'
+            else
+                ok "no empty-layout fallback was logged for $APP"
+            fi
+            if grep -qE 'no answer in time|GetLayout failed|GetLayout answered with nothing usable' "$TMP/app-wm.log" 2>/dev/null; then
+                bad "$APP's menu exchange did not complete:"
+                grep -m2 -E 'no answer in time|GetLayout' "$TMP/app-wm.log" |
+                    sed 's/^/     /'
+            else
+                ok "$APP's menu exchange completed with no fallback"
+            fi
+            if [ -z "$RPOP" ]; then
+                bad "$APP right-click produced no popup window"
+            else
+                ok "the real $APP popup appeared ($RPOP)"
+                RPH=$(win_field "$RPOP" h); RPY=$(win_field "$RPOP" y)
+                RPX2=$(win_field "$RPOP" x)
+                echo "     real popup at +$RPX2+$RPY, ${RPH}px tall"
+                if [ "$RPH" -gt 30 ]; then
+                    ok "the real popup has rows (${RPH}px tall)"
+                else
+                    bad "the real popup is too short to hold rows (${RPH}px)"
+                fi
+                # Find the real Quit row the way a user does: press rows
+                # until the app is gone. Bottom-up, because a menu's quit
+                # row is its last one, and a row that does not quit just
+                # closes the popup - so the walk reopens it each time.
+                QUIT=no
+                _py=$((RPY + RPH - 4)); _start=$((RPY + 3)); _g=0
+                while [ "$_py" -ge "$_start" ] && [ "$_g" -lt 40 ]; do
+                    press $((RPX2 + 10)) "$_py" 1
+                    sleep 0.5
+                    if app_gone; then
+                        QUIT=yes
+                        break
+                    fi
+                    [ -n "$(find_popup_near "$RCELL")" ] || {
+                        press "$RCELL" "$Y" 3
+                        sleep 0.8
+                    }
+                    _py=$((_py - 3))
+                    _g=$((_g + 1))
+                done
+                # What the client actually received. dbus-monitor is the
+                # only witness to which row a press addressed, and without
+                # it "the app did not quit" cannot be told apart from "the
+                # press never reached a row".
+                CLICK_IDS=$(clicked_ids)
+                NDISTINCT=$(printf '%s\n' $CLICK_IDS | sort -u | grep -c . \
+                    || true)
+                echo "     rows clicked on the wire: $(printf '%s' \
+                    "$CLICK_IDS" | tr '\n' ' ')"
+                if [ "$QUIT" = yes ]; then
+                    ok "a real menu row ended $APP (Quit)"
+                elif [ "$NDISTINCT" -ge 2 ] 2>/dev/null; then
+                    # The host's half is proven: the press was addressed to
+                    # $NDISTINCT different rows of the real menu, and the
+                    # app stayed up on the last one. That is the client's
+                    # own dependencies (a power-manager D-Bus service it
+                    # uninhibits through on the way out), not a menu that
+                    # would not open.
+                    echo "  ACCEPTANCE BLOCKED: $APP received clicked() for"
+                    echo "     $NDISTINCT different rows of its real menu and"
+                    echo "     did not exit on any of them. Its own log shows"
+                    sed -n '1,3p' "$TMP/app.log" 2>/dev/null |
+                        grep -iE "WARNING|error" | cut -c1-90 | sed 's/^/       /'
+                else
+                    bad "the walk never reached a second row of the real menu"
+                    bad "(ids clicked: ${CLICK_IDS:-none}), so no Quit row was reachable"
+                fi
+            fi
         fi
         stop_app
+        stop_monitor
         t=0
-        while [ "$t" -lt 30 ] && [ "$(items | wc -l)" -ne 0 ]; do
+        while [ "$t" -lt 40 ] && [ "$(items | wc -l)" -ne 0 ]; do
             sleep 0.1
             t=$((t + 1))
         done
         if [ "$(items | wc -l)" -eq 0 ]; then
             ok "registry drained after $APP exited"
         else
-            echo "  ACCEPTANCE FAILED: registry still holds $(items | tr '\n' ' ')"
+            bad "registry still holds $(items | tr '\n' ' ')"
         fi
     fi
 fi

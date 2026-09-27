@@ -20,13 +20,14 @@ void xdg_data_dirs(char dirs[][XDG_DIR_LEN], unsigned *n);
  *
  * Never use this for a name that a remote client can choose (tray
  * IconName): every distinct name, including a miss, would live in the
- * process-lifetime cache. Use icon_resolve() there. */
+ * process-lifetime cache. Use icon_resolve_ex() there. */
 image_t *icon_get(const char *name, unsigned target_h);
 
 /* Same lookup and decode, but nothing is remembered: each call decodes
  * afresh and the caller owns the returned image (free img->argb, then
- * img). For untrusted names, and when the caller copies the pixels into
- * its own storage anyway. */
+ * img). For a name the process chose itself, where no extra icon theme
+ * path is in play - which is what separates this from icon_resolve_ex(),
+ * not any difference in trust. */
 image_t *icon_resolve(const char *name, unsigned target_h);
 
 /* Same resolve-only guarantee as icon_resolve(), plus a caller-supplied
@@ -44,7 +45,9 @@ image_t *icon_resolve(const char *name, unsigned target_h);
  * icon_get()'s cache.
  *
  * Remote names (an item's IconName or AttentionIconName, a menu row's
- * icon) must go through this, never icon_get(). */
+ * icon) must go through this, never icon_get() and never icon_resolve():
+ * only this one takes the theme path the remote client advertised, which
+ * is where such an icon usually lives. */
 const image_t *icon_resolve_ex(const char *name, unsigned target_h,
     const char *extra_path);
 

@@ -43,8 +43,20 @@ XVFB_PID=""
 WM_PID=""
 
 cleanup() {
-    [ -n "$WM_PID" ] && kill -9 "$WM_PID" 2>/dev/null || true
-    [ -n "$XVFB_PID" ] && kill "$XVFB_PID" 2>/dev/null || true
+    # TERM, a grace period, then KILL: the inner phase scripts reap the
+    # processes they started, so anything still here is one this script
+    # started itself. A bare kill -9 would leave the X socket in /tmp for
+    # the next harness to trip over.
+    for _p in ${WM_PID:-} ${XVFB_PID:-}; do
+        [ -n "$_p" ] || continue
+        kill -TERM "$_p" 2>/dev/null || true
+        _t=0
+        while [ "$_t" -lt 30 ] && kill -0 "$_p" 2>/dev/null; do
+            sleep 0.1
+            _t=$((_t + 1))
+        done
+        kill -KILL "$_p" 2>/dev/null || true
+    done
     rm -rf "$TMP"
 }
 trap cleanup EXIT INT TERM
@@ -83,10 +95,42 @@ cat >"$TMP/check.sh" <<'CHECK'
 set -u
 PASS=0
 FAIL=0
+WM_PID=""
+ITEM_PID=""
+STORM_PID=""
 
 ok()   { PASS=$((PASS + 1)); echo "  ok   $*"; }
 bad()  { FAIL=$((FAIL + 1)); echo "  FAIL $*"; }
 have() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
+
+# This script starts the wm and two fake clients, and every one of the
+# phases below can exit 1 on a failed assertion - which would leave them
+# running on the harness's own X display for the rest of the machine's
+# day. So the trap is installed here, not only in the outer script: TERM,
+# a grace period, KILL, then a reap, for every pid this script started.
+stop_pid() {   # stop_pid <pid>
+    [ -n "${1:-}" ] || return 0
+    kill -TERM "$1" 2>/dev/null || true
+    _t=0
+    while [ "$_t" -lt 30 ] && kill -0 "$1" 2>/dev/null; do
+        sleep 0.1
+        _t=$((_t + 1))
+    done
+    kill -KILL "$1" 2>/dev/null || true
+    wait "$1" 2>/dev/null || true
+    return 0
+}
+
+cleanup_here() {
+    stop_pid "$ITEM_PID"
+    stop_pid "$STORM_PID"
+    stop_pid "$WM_PID"
+    WM_PID=""
+    return 0
+}
+trap cleanup_here EXIT
+trap 'cleanup_here; exit 130' INT
+trap 'cleanup_here; exit 143' TERM
 
 call() {   # call <interface.method> [args...] -> raw reply text on stdout
     _m=$1; shift
@@ -407,10 +451,38 @@ cat >"$TMP/squatter.sh" <<'SQUATTER'
 set -u
 PASS=0
 FAIL=0
+WM_PID=""
+SQUAT_PID=""
 
 ok()   { PASS=$((PASS + 1)); echo "  ok   $*"; }
 bad()  { FAIL=$((FAIL + 1)); echo "  FAIL $*"; }
 have() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
+
+# As in check.sh: this script starts two processes of its own and can exit
+# 1 from any assertion, so it owes the outer script a clean slate.
+stop_pid() {   # stop_pid <pid>
+    [ -n "${1:-}" ] || return 0
+    kill -TERM "$1" 2>/dev/null || true
+    _t=0
+    while [ "$_t" -lt 30 ] && kill -0 "$1" 2>/dev/null; do
+        sleep 0.1
+        _t=$((_t + 1))
+    done
+    kill -KILL "$1" 2>/dev/null || true
+    wait "$1" 2>/dev/null || true
+    return 0
+}
+
+cleanup_here() {
+    stop_pid "$WM_PID"
+    stop_pid "$SQUAT_PID"
+    WM_PID=""
+    SQUAT_PID=""
+    return 0
+}
+trap cleanup_here EXIT
+trap 'cleanup_here; exit 130' INT
+trap 'cleanup_here; exit 143' TERM
 
 has_gi() { python3 -c "import gi; gi.require_version('Gio', '2.0')" 2>/dev/null; }
 have_py() { python3 -c "import dbus" 2>/dev/null; }

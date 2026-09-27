@@ -25,7 +25,7 @@ NOTIFYLIBS  = $(shell pkg-config --libs dbus-1)
 endif
 BIN     = austere
 
-.PHONY: clean install uninstall install-states test test-sni test-ui
+.PHONY: clean install uninstall install-states test test-sni test-ui test-menu
 
 $(BIN): $(OBJS) Makefile
 	$(CC) $(CFLAGS) $(WPFLAGS) $(NOTIFYFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(WPLIBS) $(NOTIFYLIBS)
@@ -41,7 +41,7 @@ contrib/austere-cmd: contrib/austere-cmd.c
 clean:
 	rm -f $(BIN) $(OBJS) $(DEPS) contrib/austere-cmd
 
-test: test-sni test-ui
+test: test-sni test-ui test-menu
 
 # StatusNotifierWatcher conformance: private Xvfb display, private session
 # bus, throwaway HOME. Needs Xvfb, dbus-run-session, dbus-send; the script
@@ -69,6 +69,19 @@ test-ui: $(BIN)
 		echo "tray UI interaction: FAILED ($$rc)"; exit $$rc; \
 	else \
 		echo "tray UI interaction: PASSED"; \
+	fi
+
+# Tray item menu: the real popup over a private display and bus, with fake
+# SNI + com.canonical.dbusmenu peers. Same dependency rule as test-ui - exit
+# 77 is a skip, never a pass and never a failure of the tree.
+test-menu: $(BIN)
+	@rc=0; ./scripts/test-tray-menu.sh $(BIN) || rc=$$?; \
+	if [ $$rc -eq 77 ]; then \
+		echo "tray menu: SKIPPED (test dependencies missing)"; \
+	elif [ $$rc -ne 0 ]; then \
+		echo "tray menu: FAILED ($$rc)"; exit $$rc; \
+	else \
+		echo "tray menu: PASSED"; \
 	fi
 
 PREFIX    ?= /usr/local

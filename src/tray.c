@@ -18,6 +18,8 @@ static unsigned nview;
 #include <dbus/dbus.h>
 #include <unistd.h>
 
+#include "tray_int.h"
+
 /* Maps every snapshot index back to its table slot, so an action can be
  * resolved to a stable identity (copied out) before any bus traffic. */
 static unsigned view_src[TRAY_MAX_ITEMS];
@@ -39,6 +41,10 @@ static unsigned view_src[TRAY_MAX_ITEMS];
 #define TRAY_PATH_MAX 192
 #define TRAY_ICON_MAX 160
 #define TRAY_MENU_MAX 192
+/* IconThemePath is a remote string used as a path prefix, so it gets the
+ * same treatment as a name: bounded, and checked again per root inside
+ * icon_resolve_ex(). */
+#define TRAY_THEME_PATH_MAX 512
 #define TRAY_ID_MAX (TRAY_SERVICE_MAX + TRAY_PATH_MAX + 2)
 #define TRAY_RULE_MAX (TRAY_SERVICE_MAX + TRAY_PATH_MAX + 96)
 
@@ -46,6 +52,12 @@ static unsigned view_src[TRAY_MAX_ITEMS];
 #define TRAY_DEATH_GRACE_MS 500
 /* A property fetch that is never answered is re-armed after this long. */
 #define TRAY_FETCH_TIMEOUT_MS 1500
+/* How long tray_timeout_ms() keeps the loop awake for a menu exchange.
+ * The client's own deadline is shorter, so the client is always the one
+ * that decides; this only guarantees a round happens after that. It is
+ * a one-shot wakeup: once it passes the tray is idle again, so a menu
+ * that was dismissed, answered or failed costs nothing afterwards. */
+#define TRAY_MENU_HINT_MS 2000
 /* Backoff for a GetAll the pump could not send, so tray_timeout_ms wakes
  * the loop to retry it instead of stalling until unrelated bus traffic. */
 #define TRAY_REFRESH_RETRY_MS 250
@@ -62,6 +74,7 @@ typedef struct {
     char icon_name[TRAY_ICON_MAX];      /* IconName, raw */
     char attn_name[TRAY_ICON_MAX];      /* AttentionIconName, raw */
     char menu[TRAY_MENU_MAX];
+    char theme_path[TRAY_THEME_PATH_MAX];  /* IconThemePath, "" if none */
     tray_status_t status;
     bool is_menu;
     bool dead;                    /* owner vanished: inside the grace */
@@ -151,6 +164,7 @@ static bool view_dirty;
 static bool render_pending;       /* the snapshot changed; UI must repaint */
 static uint64_t view_sig;
 static bool full_logged;          /* the full-table warning is one-shot */
+static long long menu_hint_until; /* wake the loop for the menu's deadline */
 
 /* A closed or dropped bus connection must stop being polled: its
  * descriptor stays readable and would spin the event loop. */
@@ -197,6 +211,31 @@ icon_name_ok(const char *s)
     return strstr(s, "..") == NULL;
 }
 
+/* IconThemePath is a colon-separated list of directories the item wants
+ * searched first. It is remote and it becomes a path prefix, so it is
+ * held to the same rule as the roots icon_resolve_ex() accepts: absolute
+ * entries, no "..", nothing that would overflow a path buffer. A value
+ * that fails is dropped rather than stored, so a later good value can
+ * take its place. */
+static bool
+theme_path_ok(const char *s)
+{
+    size_t n = strlen(s);
+
+    if (!n || n >= TRAY_THEME_PATH_MAX)
+        return false;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+
+        if (c < 0x20 || c == 0x7f)
+            return false;
+        if (c == '.' && i + 1 < n && s[i + 1] == '.')
+            return false;
+    }
+    /* at least one usable absolute root, or there is nothing to keep */
+    return s[0] == '/' || strchr(s, ':') != NULL;
+}
+
 static void
 img_clear(ti_t *it)
 {
@@ -231,6 +270,7 @@ icon_pick(ti_t *it)
     const char *cand[2];
     unsigned ncand = 0;
     const char *picked = NULL;
+    const char *theme = it->theme_path[0] ? it->theme_path : NULL;
 
     /* the old image goes first: a re-resolve must not leak it, and the
      * pixmap fallback below reuses fbpx instead of owning a copy */
@@ -240,31 +280,27 @@ icon_pick(ti_t *it)
     if (it->icon_name[0])
         cand[ncand++] = it->icon_name;
     for (unsigned i = 0; i < ncand; i++) {
-        image_t *src;
+        const image_t *src;
         uint32_t *copy;
         size_t n;
 
         if (!icon_name_ok(cand[i]))
             continue;
-        /* resolve, never icon_get: a client picks this name, and every
-         * distinct name (misses included) would enter the shared
-         * process-lifetime cache without bound */
-        src = icon_resolve(cand[i], icon_px);
-        if (!src || !src->argb || !src->w || !src->h) {
-            free(src);
+        /* icon_resolve_ex, never icon_get: a client picks this name, so
+         * nothing about it may enter the process-lifetime cache. The
+         * result is the resolver's and is valid only until the next
+         * call, which is why it is copied out immediately and never
+         * freed here. Its own IconThemePath is passed so a themed
+         * indicator resolves the artwork it means. */
+        src = icon_resolve_ex(cand[i], icon_px, theme);
+        if (!src || !src->argb || !src->w || !src->h)
             continue;
-        }
         n = (size_t)src->w * src->h * sizeof(uint32_t);
         copy = malloc(n);
-        if (!copy) {
-            free(src->argb);
-            free(src);
-            break;
-        }
+        if (!copy)
+            break;   /* the resolver reclaims its own image for us */
         memcpy(copy, src->argb, n);
         img_set(it, copy, src->w, src->h);
-        free(src->argb);
-        free(src);
         picked = cand[i];
         it->icon_warned = false;
         break;
@@ -423,6 +459,10 @@ item_reset(ti_t *it, bool from_handler)
         pend_drop_serial(it->pending, !from_handler);
         it->pending = 0;
     }
+    /* the menu client keeps its own copy of the identity, so it can be
+     * told before the table loses it; the memset below would leave it
+     * talking to a slot that no longer means anything */
+    traymenu_item_gone(it->service, it->path);
     img_clear(it);
     free(it->fbpx);
     memset(it, 0, sizeof(*it));
@@ -534,6 +574,10 @@ view_rebuild(void)
             v->icon_name = it->icon_name;
         v->img = it->img;
         v->menu_path = it->menu[0] ? it->menu : "";
+        /* not hashed below: ItemIsMenu changes what a press does, not
+         * what the bar draws, so a change in it must not cost a repaint.
+         * The button path reads the live view, never a copy of it. */
+        v->is_menu = it->is_menu;
         n++;
     }
     hash_bytes(&h, &n, sizeof(n));
@@ -571,13 +615,21 @@ view_sync(void)
  * registered object, so a pending call is the only way to see a reply at
  * all; untracked calls (AddMatch) get their reply discarded, which is
  * exactly what we want. */
-enum { PEND_NAME, PEND_HOST, PEND_PROPS, PEND_KINDS };
+/* src/tray_int.h owns the canonical list, so the menu client and this
+ * file cannot drift apart on what a pending call means. These aliases
+ * keep the rest of the file as it was written; the menu kinds are used
+ * by src/tray_menu.c through trayint_send_tracked(). */
+#define PEND_NAME  TRAYINT_PEND_NAME
+#define PEND_HOST  TRAYINT_PEND_HOST
+#define PEND_PROPS TRAYINT_PEND_PROPS
 
-#define PEND_MAX (TRAY_MAX_ITEMS + PEND_KINDS)
+/* Sized from the canonical kind count, not from a copy of it. */
+#define PEND_MAX (TRAY_MAX_ITEMS + TRAYINT_PEND_KINDS)
 
 typedef struct {
     DBusPendingCall *pc;
     dbus_uint32_t serial;
+    long long since;    /* monotonic ms, so a menu call cannot hold a slot */
     int kind;
 } pend_t;
 
@@ -614,6 +666,7 @@ send_tracked(DBusMessage *msg, int kind, dbus_uint32_t *serial_out)
     dbus_message_unref(msg);
     pends[npends].pc = pc;
     pends[npends].serial = serial;
+    pends[npends].since = now_ms();
     pends[npends].kind = kind;
     npends++;
     if (serial_out)
@@ -680,6 +733,57 @@ bus_add_match(const char *rule)
     dbus_message_iter_init_append(m, &it);
     dbus_message_iter_append_basic(&it, DBUS_TYPE_STRING, &rule);
     send_msg(m);
+}
+
+/* ---- the internal seam (src/tray_int.h) ------------------------------
+ *
+ * One connection, one reply table, one set of registered object paths,
+ * shared with the menu client in src/tray_menu.c. Every one of these is
+ * a non-blocking pass-through to something above: the menu never opens a
+ * second connection, never runs a second dispatch loop, and never
+ * blocks. trayint_bus() answers NULL for a connection that is gone, so
+ * the menu can fail open instead of sending into a dead socket.
+ */
+DBusConnection *
+trayint_bus(void)
+{
+    return bus_live() ? bus : NULL;
+}
+
+long long
+trayint_now_ms(void)
+{
+    return now_ms();
+}
+
+void
+trayint_send(DBusMessage *msg)
+{
+    send_msg(msg);
+}
+
+bool
+trayint_send_tracked(DBusMessage *msg, int kind, dbus_uint32_t *serial_out)
+{
+    return send_tracked(msg, kind, serial_out);
+}
+
+void
+trayint_path_add(const char *path)
+{
+    path_add(path);
+}
+
+void
+trayint_path_drop(const char *path)
+{
+    path_drop(path);
+}
+
+void
+trayint_add_match(const char *rule)
+{
+    bus_add_match(rule);
 }
 
 static void
@@ -1259,13 +1363,20 @@ prop_apply(ti_t *it, const char *key, DBusMessageIter *v)
             dbus_message_iter_get_basic(v, &b);
             it->is_menu = b ? true : false;
         }
+    } else if (!strcmp(key, "IconThemePath")) {
+        char buf[TRAY_THEME_PATH_MAX];
+
+        str_value(v, buf, sizeof(buf));
+        /* a bad value clears the field rather than being kept: the icon
+         * must never resolve against a path the loader would refuse */
+        snprintf(it->theme_path, sizeof(it->theme_path), "%s",
+            theme_path_ok(buf) ? buf : "");
     } else if (!strcmp(key, "IconPixmap")) {
         if (dbus_message_iter_get_arg_type(v) == DBUS_TYPE_ARRAY)
             pixmap_parse(it, v);
     }
-    /* IconThemePath, ToolTip, OverlayIcon* and Category are accepted and
-     * ignored: the first has no hook in the icon loader, the rest are
-     * rendering concerns. */
+    /* ToolTip, OverlayIcon* and Category are accepted and ignored: they
+     * are rendering concerns, not ones this backend owns. */
 }
 
 static void
@@ -1481,7 +1592,12 @@ pend_harvest(void)
                 on_props_reply(&items[k], reply);
                 break;
             }
-        } else
+        } else if (kind >= TRAYINT_PEND_MENU_ABOUT)
+            /* the menu client matches the reply by the serial it
+             * recorded when it sent the call, and drops anything that
+             * no longer belongs to the open menu */
+            traymenu_dispatch(reply);
+        else
             on_reply(kind, reply);
         dbus_message_unref(reply);
     }
@@ -1506,7 +1622,10 @@ on_message(DBusConnection *conn, DBusMessage *msg, void *user_data)
             if (iface && member && !strcmp(iface, DBUS_IFACE_FULL) &&
                 !strcmp(member, "NameOwnerChanged"))
                 on_name_owner_changed(msg);
-            else {
+            else if (traymenu_dispatch(msg)) {
+                /* a LayoutUpdated or ItemsPropertiesUpdated on the open
+                 * menu's path: taken, coalesced and refetched later */
+            } else {
                 ti_t *it = item_by_signal(msg);
 
                 if (it)
@@ -1631,6 +1750,7 @@ tray_shutdown(wm_t *wm)
     view_sig = 0;
     view_dirty = false;
     render_pending = false;
+    menu_hint_until = 0;
     icon_px = TRAY_DEFAULT_ICON_PX;
     icon_px_set = 0;
 }
@@ -1688,7 +1808,20 @@ pump_round(void)
         }
         i++;
     }
+    /* A menu call that is never answered must not hold a reply-table slot
+     * forever. By now the client has already fallen back to the item's own
+     * ContextMenu, and a table it cannot get into would start refusing the
+     * item fetches too. Dropped from here, which is not inside a handler,
+     * so cancelling is safe. */
+    for (unsigned i = 0; i < npends; ) {
+        if (pends[i].kind >= TRAYINT_PEND_MENU_ABOUT &&
+            now - pends[i].since > TRAY_MENU_HINT_MS)
+            pend_drop_serial(pends[i].serial, true);
+        else
+            i++;
+    }
     props_flush();
+    traymenu_round();
     view_sync();
 }
 
@@ -1745,6 +1878,16 @@ tray_timeout_ms(wm_t *wm)
         if (best < 0 || left < best)
             best = (int)left;
     }
+    /* a menu exchange in flight is waiting on a reply nobody may send, so
+     * the loop has to be woken for its deadline even on a quiet bus */
+    if (menu_hint_until) {
+        long long left = menu_hint_until - now;
+
+        if (left < 0)
+            left = 0;
+        if (best < 0 || left < best)
+            best = (int)left;
+    }
     return best;
 }
 
@@ -1788,6 +1931,68 @@ tray_set_icon_size(wm_t *wm, unsigned px)
     view_sync();
 }
 
+/* The Menu property names the com.canonical.dbusmenu object, which is not
+ * necessarily the item's own path: a standard KDE item keeps its SNI at
+ * /StatusNotifierItem and its menu at /MenuBar. The spec's sentinel for
+ * "this item has no menu" is the literal /NO_DBUSMENU, and a value that is
+ * not a usable object path is refused too, so a client cannot aim the
+ * menu exchange at something arbitrary. Refusing here is what makes the
+ * caller fall back to the item's own ContextMenu. */
+static bool
+menu_path_ok(const char *s)
+{
+    size_t n;
+
+    if (!s)
+        return false;
+    n = strlen(s);
+    if (n < 2 || n >= TRAY_MENU_MAX)  /* "/x" is the shortest object path */
+        return false;
+    if (s[0] != '/' || !strcmp(s, "/NO_DBUSMENU"))
+        return false;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+
+        if (c < 0x20 || c == 0x7f)
+            return false;
+    }
+    return true;
+}
+
+/* True when this item advertises a menu object we can address. */
+static bool
+item_menu_addressable(const ti_t *it)
+{
+    return menu_path_ok(it->menu);
+}
+
+/* Everything the menu client needs is copied out of the table before any
+ * traffic: the item's own path, which is its identity and what its death
+ * is matched against, the menu object it advertised, which is where the
+ * exchange is actually addressed, and its IconThemePath, so a row icon is
+ * looked for in the same theme the item's own artwork came from. A later
+ * pump that moves or drops the table slot cannot redirect any of it. */
+static bool
+menu_start(const ti_t *it, int root_x, int root_y)
+{
+    traymenu_req_t req;
+
+    if (!bus_live() || !item_menu_addressable(it))
+        return false;
+    req.service = it->service;
+    req.path = it->path;
+    req.menu_path = it->menu;
+    req.theme_path = it->theme_path;
+    req.root_x = root_x;
+    req.root_y = root_y;
+    if (!traymenu_open(&req))
+        return false;
+    /* armed only once the exchange really started, and it expires on its
+     * own, so a refused open costs the loop nothing */
+    menu_hint_until = now_ms() + TRAY_MENU_HINT_MS;
+    return true;
+}
+
 void
 tray_click(unsigned idx, unsigned btn, int root_x, int root_y)
 {
@@ -1804,12 +2009,21 @@ tray_click(unsigned idx, unsigned btn, int root_x, int root_y)
     snprintf(path, sizeof(path), "%s", it->path);
     switch (btn) {
     case 1:     /* an ItemIsMenu item has no Activate of its own */
-        member = it->is_menu ? "ContextMenu" : "Activate";
+        if (it->is_menu) {
+            if (!menu_start(it, root_x, root_y))
+                member = "ContextMenu";
+            return;
+        }
+        member = "Activate";
         break;
     case 2:
         member = "SecondaryActivate";
         break;
     case 3:
+        /* the menu the item exports, or its own ContextMenu when it
+         * advertises none we can address */
+        if (menu_start(it, root_x, root_y))
+            return;
         member = "ContextMenu";
         break;
     case 4:
@@ -1842,6 +2056,32 @@ tray_scroll(unsigned idx, int delta, bool horizontal)
     /* the wire spells the axis lowercase and the delta signed, positive
      * meaning up (or right) */
     item_call_scroll(service, path, (int32_t)delta, horizontal);
+}
+
+bool
+tray_menu_open(unsigned idx, int root_x, int root_y)
+{
+    ti_t *it;
+    char service[TRAY_SERVICE_MAX], path[TRAY_PATH_MAX];
+
+    if (idx >= nview)
+        return false;
+    it = &items[view_src[idx]];
+    if (menu_start(it, root_x, root_y))
+        return true;
+    /* Refused, and the press still has to be answered. The tray module
+     * calls this and returns without a second attempt, on the contract that
+     * a false return has already been handled here, so an item that
+     * advertises no menu we can address - /NO_DBUSMENU, or a path the
+     * loader would refuse - gets its own ContextMenu from this function
+     * rather than silence. Fire and forget, exactly like tray_click's. */
+    if (!bus_live())
+        return false;
+    snprintf(service, sizeof(service), "%s", it->service);
+    snprintf(path, sizeof(path), "%s", it->path);
+    item_call_xy(service, path, "ContextMenu", (int32_t)root_x,
+        (int32_t)root_y);
+    return false;
 }
 
 #else /* AUSTERE_NO_DBUS */
@@ -1918,6 +2158,18 @@ tray_scroll(unsigned idx, int delta, bool horizontal)
     (void)idx;
     (void)delta;
     (void)horizontal;
+}
+
+/* No bus, so there is no menu to open; the UI falls back to the item's
+ * own ContextMenu, which is what an item with no internal menu does
+ * anyway. */
+bool
+tray_menu_open(unsigned idx, int root_x, int root_y)
+{
+    (void)idx;
+    (void)root_x;
+    (void)root_y;
+    return false;
 }
 
 #endif /* AUSTERE_NO_DBUS */

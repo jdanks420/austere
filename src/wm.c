@@ -28,6 +28,7 @@
 #include "socket.h"
 #include "state.h"
 #include "tray.h"
+#include "tray_menu_ui.h"
 #include "welcome.h"
 #include "keys.h"
 #include "conf.h"
@@ -219,6 +220,10 @@ shutdown(wm_t *wm)
     socket_shutdown(wm);
     bars_shutdown(wm);
     notify_shutdown(wm);
+    /* the popup before the backend and before draw_shutdown: it reads the
+     * published menu and draws with the shared draw state, so both have to
+     * still be there when it goes */
+    tray_menu_ui_shutdown(wm);
     tray_shutdown(wm);
     popups_shutdown(wm);
     draw_shutdown(wm);

@@ -71,13 +71,33 @@ void trayint_add_match(const char *rule);
 
 /* ---- the other direction, into src/tray_menu.c ------------------------ */
 
-/* Start the exchange for one item. service and path are the canonical
- * identity copied out of the item table before any bus traffic, so the
- * menu keeps talking to the same item even if the table moves under it.
- * Returns false when there is no usable bus, and the caller then falls
- * back to the item's own ContextMenu. */
-bool traymenu_open(const char *service, const char *path, int root_x,
-    int root_y);
+/* One menu exchange, asked for by the item table. The two paths are
+ * separate on purpose: the item's own object path is its identity and is
+ * what item death is matched against, while menu_path is the
+ * com.canonical.dbusmenu object the item advertised through its Menu
+ * property. They are the same path for an Ayatana-style item that
+ * exports both, and different for a standard KDE one whose SNI lives at
+ * /StatusNotifierItem and whose menu lives at /MenuBar.
+ *
+ * A struct rather than six arguments: two adjacent const char * paths
+ * that mean different things are one transposition away from sending a
+ * menu call to the wrong object, and nothing would complain.
+ *
+ * Every string is borrowed for the duration of the call only, and the
+ * client copies what it keeps: the item table moves on removal, so a
+ * pointer into it is not stable. */
+typedef struct {
+    const char *service;     /* the item's well-known name */
+    const char *path;        /* the item's own object path */
+    const char *menu_path;   /* the advertised dbusmenu object path */
+    const char *theme_path;  /* the item's IconThemePath, "" or NULL if none */
+    int root_x, root_y;      /* the press, in root coordinates */
+} traymenu_req_t;
+
+/* Start the exchange for one item. Returns false when the request cannot
+ * be honoured - no usable bus, or an item with no menu to address - and
+ * the caller then falls back to the item's own ContextMenu. */
+bool traymenu_open(const traymenu_req_t *req);
 
 /* Offer one message to the menu client: a method call, a signal, or the
  * reply of a tracked menu kind (matched by the serial the caller
@@ -91,7 +111,9 @@ bool traymenu_dispatch(DBusMessage *msg);
 void traymenu_round(void);
 
 /* The item is gone: drop its menu and any exchange still in flight for
- * it, and report the current state so the popup can close itself. */
+ * it, and report the current state so the popup can close itself. Matched
+ * on the item's own identity, never on the menu path, which is a
+ * property of the item and outlives neither. */
 void traymenu_item_gone(const char *service, const char *path);
 
 #endif

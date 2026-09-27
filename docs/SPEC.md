@@ -3,7 +3,7 @@
 Austere is a low-spec, lightweight desktop shell for X11: a window manager
 with built-in tiling, stacking, and floating layouts, plus a minimal statusbar.
 It targets old hardware: small resident footprint, zero GPU/compositing work,
-and only libxcb as a hard dependency.
+and a short enumerated dependency set instead of a toolkit (§1).
 
 This document is the source of truth for design decisions. `PHILOSOPHY.md`
 (same directory) explains *why* those decisions exist — principles, the
@@ -19,7 +19,7 @@ deliberate divergences from suckless, and tiebreakers for gaps.
 |---|---|
 | Resident memory | ≤ 4.5 MB PSS idle, < 3 MB private (measured 3.4 MB PSS / 3.1 MB private) |
 | Binary size | ≤ 260 KB stripped (measured 252 KB, imlib2 build) |
-| Dependencies | libxcb incl. `shape` (+ xcb-util keysyms/icccm/randr/xtest); `fontconfig` + `freetype` for text (no Xlib/Xft); `imlib2` only if built with wallpaper thumbnails (AUSTERE_NO_IMLIB2 omits it); `tomlc17` found in `3rdparty/` |
+| Dependencies | libxcb incl. `shape` (+ xcb-util keysyms/icccm/randr/xtest); `fontconfig` + `freetype` for text (no Xlib/Xft); `libdbus` for the session-bus services — `org.freedesktop.Notifications` (§7.5) and the StatusNotifierItem host (§7.6) — omitted entirely by `AUSTERE_NO_DBUS=1`; `imlib2` only if built with wallpaper thumbnails (AUSTERE_NO_IMLIB2 omits it); `tomlc17` found in `3rdparty/` |
 | Input latency | Direct event loop, no polling layers |
 | Extensibility | New layouts added by writing one `.c` file + one registry line |
 | Configurability | Every aspect adjustable at runtime — settings menu for normal use, named config *states* (pick to auto-apply + persist), plain-text config file + manual `reload` for advanced use |
@@ -89,8 +89,9 @@ recomputes all client geometries via the active layout, then flushes.
 
 One `poll()` over these fds: the X connection, the command-socket
 listener (if enabled), per-connection socket fds, script-module stdout
-pipes (§6.3), and a self-pipe for signal delivery (SIGHUP reload,
-SIGINT/SIGTERM shutdown). Nothing else.
+pipes (§6.3), the notification and tray bus connections (§7.5, §7.6), and
+a self-pipe for signal delivery (SIGHUP reload, SIGINT/SIGTERM shutdown).
+Nothing else.
 
 1. Drain `xcb_poll_for_event()` in a loop (no threads).
 2. Dispatch through a switch on `event->response_type`.
@@ -117,15 +118,28 @@ src/
   settings.c/h   Settings struct, compiled-in defaults, live-apply dispatcher
   conf.c/h       austere.conf parser/serializer (TOML via vendored tomlc17)
   states.c/h     config states: named .toml snippets, picker, boot override
-  menu.c/h       shared native panel UI: list rendering, text input, key nav
-  settings_menu.c/h  settings sections rendered over the panel API
+  menu.c/h       shared native panel UI: list rendering, text input, key nav;
+                 also the settings menu — gen_rows() builds its sections and
+                 rows, menu_open() shows it, over the same panel API
   switcher.c/h   window switcher panel + MRU quick-cycle
   launcher.c/h   PATH scan cache, custom entries, command execution
+  tray.c/h       StatusNotifierItem host: watcher, item registry, flat menu state
+  tray_int.h     internal D-Bus seam between the tray backend and the menu client
+  tray_menu.c    com.canonical.dbusmenu client (labels, state, row icon names)
+  tray_menu_ui.c/h  tray item menu popup, drawn from the published menu view
+  notify.c/h     org.freedesktop.Notifications service (uses libdbus)
+  icons.c/h      icon lookup/decode, incl. the tray's uncached remote-name path
   util.c/h       die(), clamp(), misc
 ```
 
 Dependency rule: `layouts/*` may only see the public headers (`layout.h`,
 `wm.h`, `settings.h`). Nothing includes another layout's file.
+
+The tray splits the same way its protocol does: `tray.h` is the D-Bus-free
+public surface and compiles unchanged in every build variant, `tray_int.h`
+is the only place libdbus types may appear outside `tray.c` itself, and
+`bar_modules/tray.c` / `tray_menu_ui.c` read published views without ever
+calling into the bus (§7.6).
 
 ---
 
@@ -477,6 +491,7 @@ others ignore them.
 | `volume` | shells `pactl`, falls back to `amixer`, at `interval` | deliberately impure: no uniform mixer ABI without libasound, which we refuse to link |
 | `cpu` | `/proc/stat` delta | refresh on the 1 s stats tick; first frame shows 0% |
 | `ram` | `/proc/meminfo` | `MemTotal`−`MemAvailable` as %; same 1 s tick |
+| `tray` | StatusNotifierItem host (§7.6) | reads only the published item view; all bus traffic happens in `tray.c` |
 
 Bar items fall into three placement groups — **left**, **center**, **right**
 (§6.4). A missing group falls back to the default arrangement below;
@@ -484,10 +499,19 @@ place any subset in any order per monitor-wide via `[bar]` config
 **list-type** keys — `modules_left`, `modules_center`, `modules_right` —
 each an array of roaster names (unknown names abort a strict load). The
 default arrangement encodes the group in the table order:
-`workspaces`, `layout` on the left; `title` centered; `cpu`, `ram`,
+`workspaces`, `layout` on the left; `title` centered; `tray`, `cpu`, `ram`,
 `battery`, `volume`, `clock` on the right. Click hit-testing covers all
 three groups; the settings menu stays reachable via right-click
-anywhere on the bar.
+anywhere on the bar — except on the `tray` module, which claims right-click
+for the item's own menu (§7.6).
+
+**Adding the tray to an existing config.** The default arrangement is what
+a *generated* `austere.conf` contains. A config that already exists is
+loaded as written: neither a load nor a settings-menu **Save** (§9.2) adds
+`tray` to a module list austere did not generate, so the tray does not
+appear until the user adds `"tray"` to `modules_left`, `modules_center`, or
+`modules_right` by hand. `tray` is a valid name in every build variant,
+including `AUSTERE_NO_DBUS=1`, where it renders nothing.
 
 ### 6.3 Script-module protocol
 
@@ -516,20 +540,25 @@ anywhere on the bar.
   composited line are cached per font (drawn on demand, idle frames
   allocate nothing). The color palette is allocated once from the root
   colormap and refreshed on settings reload.
-- Right-click anywhere on the bar opens the settings menu (§9.3).
+- Right-click anywhere on the bar opens the settings menu (§9.3) — except
+  on the `tray` module, which claims right-click for the item's own menu
+  (§7.6).
 - Redraw policy: full redraw on any change; a bar is < 2000×20 px of
   image-text calls, trivially cheap on any hardware.
 
 ---
 
-## 7. Overlay panels — switcher & launcher
+## 7. Overlay panels — switcher, launcher, tray
 
-Both tools are instances of one shared native panel component (`menu.c`):
+The switcher and the launcher are instances of one shared native panel
+component (`menu.c`):
 a WM-owned window, centered on the focused monitor, keyboard-driven, drawn
 with the exact same primitives as the bar (fontconfig/freetype text
 compositing + rectangles).
 Input is grabbed while a panel is open; all other X events queue normally
 and are processed after close. Panels never appear in the client list.
+The tray (§7.6) is a bar module first and a panel second, and is specified
+on its own below.
 
 ### 7.1 Shared panel API
 
@@ -675,6 +704,251 @@ errors) without depending on any external notification daemon:
   `popup_timeout` seconds (default 5). Purely visual — no input grab,
   clicks pass through to whatever is beneath.
 - Always mirrored to stderr; the popup is a convenience, not the record.
+
+### 7.6 System tray — StatusNotifierItem (`tray.c`)
+
+Austere is its **own** StatusNotifierItem host: it owns
+`org.kde.StatusNotifierWatcher` on the session bus, tracks registered
+items, and renders their icons as the `tray` bar module (§6.2). No
+external tray daemon, panel, or `stalonetray`-style helper is required or
+consulted. Deliberate non-goal: the **legacy XEmbed tray protocol is not
+implemented** — an app that offers only `XEmbed` will not appear.
+
+**Protocol surface.** The watcher exports `/StatusNotifierWatcher` with
+`org.freedesktop.DBus.Properties` (Get/GetAll) and `Introspect`, reports
+`ProtocolVersion = 0` and `IsStatusNotifierHostRegistered = true`, and
+issues a `StatusNotifierItemRegistered` signal per item. All four
+registration forms are accepted (bare object path, unique name, well-known
+name, and the Ayatana `service/path` pair). Property refresh
+(`PropertiesChanged`, `NewIcon`, `NewTitle`) is asynchronous and a failed
+fetch is retried on a short deadline rather than blocking the event loop.
+
+**Where it lives.** The backend (`tray.c`) is presentation-free: it owns
+the registry, the item order, the decoded pixels, the menu model, and every
+wire call, and it has no dependency on the bar. It reports a *dirty flag*;
+`event.c` turns that into at most one `bar_render_all()` per wake. The bar
+module and the menu popup read published snapshots and dispatch intents
+back — they never touch the bus. `tray.h` is D-Bus-free and compiles
+unchanged in every build variant; `tray_int.h` is the only internal seam
+where libdbus types may appear.
+
+**Interaction.** One mapping, applied over the visible items in backend
+order:
+
+| Input | Sent to the item |
+|---|---|
+| Btn1 | `Activate(x, y)` — or the item's menu, when it declares `ItemIsMenu` |
+| Btn2 | `SecondaryActivate(x, y)` |
+| Btn3 | the item's own menu (§7.6.1) |
+| Btn4 / Btn5 | `Scroll(±1, vertical)` |
+| Btn6 / Btn7 | `Scroll(±1, horizontal)` |
+
+Every menu-opening path — Btn1 on an `ItemIsMenu` item and Btn3 on any
+item — lands on the same exchange, and falls back to a single
+`ContextMenu(x, y)` to the SNI object when there is no menu to open
+(§7.6.1).
+
+Indices are resolved against the snapshot the click was hit-tested on, so
+a click is never delivered to an item that moved underneath it. Btn3 on the
+tray is the item's menu, **not** the bar settings menu (§6.2); every other
+module keeps the global settings-menu behavior.
+
+**Visibility rules.** `Passive` items are hidden from the view entirely.
+`NeedsAttention` shows the item's attention icon in place of its normal
+one, with no tint or animation of our own. An item whose icon cannot be
+resolved still gets a visible, clickable placeholder rather than a gap. An
+empty view collapses the module to zero width, and the same item list
+renders on **every** monitor, as a duplicated host is expected to. A bar
+too narrow for the whole strip keeps the leading run of items and drops the
+rest; measure, draw, and hit-test use the same truncation so the two can
+never disagree.
+
+#### 7.6.1 Flat item menu
+
+Right-click opens the item's menu as a native popup drawn with the panel
+primitives — no toolkit, no separate process, **no keyboard grab**: the
+window is override-redirect, takes no focus, and never blocks the event
+loop.
+
+**Where the exchange is addressed.** The item's `Menu` property names the
+`com.canonical.dbusmenu` object, and that string is the address for every
+menu call and signal. It is usually *not* the item's own path, so the two
+are kept apart: the item's own path stays its identity (and is what its
+death is matched against), while the advertised path is registered for
+exactly as long as the menu is open, so a `/MenuBar` item's signals are
+actually routed here. All three real-world shapes work and are exercised:
+
+| Item shape | SNI object | Menu object |
+|---|---|---|
+| Ayatana-style (one object exports both) | `/StatusNotifierItem` | same path |
+| Standard KDE (split) | `/StatusNotifierItem` | `/MenuBar` |
+| Nested sub-path of the item's own object | `/TraySub` | `/TraySub/Menu` |
+
+A `Menu` value that is not a usable object path is refused, as is the
+spec's `/NO_DBUSMENU` sentinel, so a client cannot aim the exchange at
+something arbitrary.
+
+**The exchange.** Root `Event("opened")`, then a tracked
+`AboutToShow(0)`, then a tracked `GetLayout(0, -1, [])`. The layout is
+always fetched *after* the `AboutToShow` answer, never in parallel, because
+the answer may have changed the menu; its `need_update` boolean is advisory
+and an empty reply means the same thing. `GetGroupProperties` is **not**
+sent — a `GetLayout` reply already carries every row property the popup
+needs.
+
+`GetLayout` is canonical: two out args, a `u` revision and a
+`(ia{sv}av)` layout struct. The struct is `(id, properties, children)`, so
+the **rows are its third field** — the `av` children array — and each
+element of that array is a **variant** wrapping its own `(ia{sv}av)`
+struct, which the reader unwraps before taking that child's id and
+properties. A depth of `-1` asks for the whole tree; a reader that only
+wants one level stops there.
+
+The children array is read **one level deep**. A child that itself carries
+children is a submenu and is skipped rather than flattened. Per row the
+backend reads `label`, `type` (`standard` / `separator`), `enabled`,
+`visible`, `toggle-type` (`checkmark` / `radio`), `toggle-state` and
+`icon-name`, and publishes what it keeps; the popup only draws it.
+
+Scope is deliberately **flat**, and the accepted omissions are as much a
+part of the contract as the features:
+
+| Supported | Deferred |
+|---|---|
+| Row labels (GTK `_` mnemonics stripped) | Submenus |
+| Separators | `icon-data` (inline PNG) row icons |
+| Enabled vs disabled rows | Tooltips |
+| Toggle and radio state | Hover feedback |
+| Row icons by `icon-name` | |
+| A menu title from the root's `label` | |
+
+**Closing.** A click on an enabled, non-separator row sends exactly one
+`Event(id, "clicked")` and closes the popup, with the root `Event("closed")`
+the protocol owes. A separator or disabled row is inert: it swallows the
+press without activating and **without** closing. `Escape` closes, routed by
+the event loop because the popup holds no focus. A press outside the popup
+closes it and is consumed — except on a bar window, where it is closed and
+then passed on, so right-clicking another tray icon switches menus instead
+of only dismissing.
+
+**Staying current.** `LayoutUpdated` and `ItemsPropertiesUpdated` arriving
+on the menu object coalesce into a single refetch, and the published rows
+stay on screen until the new layout lands, so a signal storm redraws once
+instead of flickering or blanking.
+
+**Fallback.** No usable internal menu — the property is absent, unusable,
+`/NO_DBUSMENU`, the exchange errors, the menu has no rows, or no answer
+arrives within 1500 ms — and the backend sends the item's own `ContextMenu`
+**to the SNI object, exactly once**, so the click is never swallowed.
+Opening never blocks: the popup moves `LOADING → READY`, or to `FAILED`,
+and `FAILED` draws nothing.
+
+#### 7.6.2 Icon resolution
+
+Tray icons are resolved by the **host**, in this order:
+
+1. Every root in the item's own `IconThemePath`, which is how an app ships
+   artwork that is not installed system-wide. Each root is treated as a
+   theme when it has an `index.theme` and as a plain icon directory when it
+   does not (some ship both). Only absolute, traversal-free roots are
+   honoured, up to a fixed count.
+2. Each XDG data dir's `icons/hicolor` — the freedesktop fallback theme.
+3. The pre-existing `hicolor/apps` and `pixmaps` lookup, unchanged.
+
+A theme's `index.theme` supplies `Directories`, the `Size` each is drawn
+at, and `Inherits`; the walk follows the chain, bounded by a fixed depth
+cap, with an explicit already-on-the-chain check so an `Inherits` **cycle**
+terminates instead of re-walking to the cap. Only `index.theme` is read —
+the `.index` lookup file is not used, and **the user's configured desktop
+icon theme is not read either**: `hicolor` is the only theme searched under
+the XDG data dirs. A themed icon therefore has to be reachable through the
+item's own `IconThemePath` or through `hicolor`; a name that only exists in
+the user's desktop theme is a miss.
+
+Theme *indexes* may be cached — a small bounded set, reference-counted so
+eviction cannot pull a theme out from under an inheritance walk in progress.
+**Remote names and results are never cached.** An `IconName` or a row's
+`icon-name` is attacker-chosen data, so it is resolved through an uncached
+entry point that keeps nothing between calls; otherwise a client cycling
+through fresh names grows a process-lifetime cache without bound.
+`icon_get()`, used for names austere itself chooses (launcher rows, toasts),
+keeps its existing cache; `icon_resolve_ex()` is the only entry point
+remote names may use, and its header comment says so. Menu row icons go
+through the same entry point, with the item's own `IconThemePath`, so a row
+mark is looked for in the same theme the item's own artwork came from.
+
+#### 7.6.3 Ownership, contention, and omissions
+
+- Austere wins or it defers, and it says so: if the name
+  `org.kde.StatusNotifierWatcher` is **already owned by another watcher**,
+  austere does not fight for it. It writes the contention to stderr —
+  naming what to stop so the tray can be served — and the tray stays empty.
+  There is no polling retry: austere re-requests the name only if it later
+  observes the name become unowned, and it goes inert again if another
+  watcher takes the name back. Registration attempts arriving while austere
+  does not own the name are refused with a D-Bus error rather than
+  silently accepted.
+- A bus disconnect tears the tray down for good: the connection is closed
+  and never re-established, so the bar drops its icons and the tray stays
+  empty until austere itself restarts. A dropped connection is recognized
+  and removed from the poll set — an unread descriptor there is a 100% CPU
+  spin.
+- `AUSTERE_NO_DBUS=1` compiles the same public header against inert stubs
+  that report an empty view and `-1` for every descriptor. The `tray`
+  module name stays valid in every build variant, so a config written for a
+  full build still loads — it just shows nothing.
+- Registry, label, and menu-path buffers are fixed-size and truncated, so a
+  hostile client cannot make austere allocate from a string it chose; a
+  `Menu` value that is not a usable object path is refused rather than
+  called, and a menu offering more rows than fit is published truncated.
+- The popup reads and writes nothing on the bus and holds no grab, so it
+  cannot wedge the event loop; a failed menu leaves no window behind.
+- **Deferred, on purpose:** legacy XEmbed; menu submenus, `icon-data` PNG
+  row icons, tooltips and hover feedback; menu scrolling; item
+  ordering/reordering controls, ignore lists, per-item coloring; and any
+  tray-related configuration keys (item icon size follows the bar's inner
+  height; there is no `tray_*` setting yet).
+
+#### 7.6.4 How this is verified
+
+`make test` runs three harnesses, each on its own private Xvfb display and
+its own private session bus: watcher protocol conformance, bar-module
+interaction, and the item menu. Their display ranges are disjoint, so
+`make -j3 test` is supported and no two harnesses can race for the same
+socket. Every process a harness starts is stopped the same bounded way —
+`SIGTERM`, a bounded wait, then `SIGKILL` and an explicit reap, so no
+child can outlive its harness and a process that ignores the first signal
+cannot wedge the run.
+
+A missing optional tool is reported as an explicit **SKIP** — never as a
+pass, and never as a failure of the tree. Anything that *is* present is a
+hard gate, and `make test` fails if it breaks.
+
+The menu harness drives the real popup through the real event loop against
+fake SNI and DBusMenu peers, and proves the parts that are easy to get
+subtly wrong: a click emits exactly one `Event(id, "clicked")` and closes;
+a separator or disabled row is inert and leaves the popup up; an outside
+press closes without reaching a tray item; `Escape` closes; a
+`LayoutUpdated` refetches while the popup stays up; the split `/MenuBar`
+and nested sub-path items address their menu object and not their SNI
+object; and a broken menu falls back to **one** `ContextMenu` to the SNI
+object with no `GetLayout` sent after the error.
+
+The real `caffeine` acceptance in the bar-module harness is a **hard gate
+on all three claims, whenever the app is installed**: `caffeine-cup-empty`
+must resolve to a themed icon — no no-icon log line and no `IconPixmap`
+fallback — the real right-click must open a real popup **with rows**, and a
+real *Quit* row must end the app. There is no "the environment can't tell"
+escape hatch in the middle of that sequence: the harness is expected to
+drive the real menu headlessly, and a regression in any of the three fails
+`make test`. Only an environment that genuinely cannot supply the app may
+report `ACCEPTANCE BLOCKED`, which is information, not a pass and not a
+failure — that covers caffeine not being installed, never a step the
+harness chose to skip.
+
+**Manual acceptance is what a private Xvfb display cannot show at all**:
+multi-monitor duplicate rendering, top/bottom bar placement, and the first
+run of a config that already lists `tray`.
 
 ---
 
@@ -966,6 +1240,15 @@ them keep the live-apply case.
   entries are dropped and the file is consumed (deleted) either way.
 - **Socket-safe**: a misbehaving socket client can stall or crash itself but
   never the WM (§8 failure isolation).
+- **Bus-hostile-client-safe**: a tray item is untrusted input. Every
+  property read is length/type checked, the item registry and all menu
+  buffers are fixed-size and truncate rather than grow, remote icon names
+  are resolved without caching, a lost bus fd is recognized as such (an
+  unread descriptor in a poll set is a 100% CPU spin), and **no tray code
+  path blocks** — there are no threads and no synchronous bus calls (§7.6).
+- **Contention-safe**: a name austere cannot own is reported and released,
+  never fought over — true of the WM selection (§5.1) and of
+  `org.kde.StatusNotifierWatcher` (§7.6.3).
 
 ## 11. Performance notes (why this meets the low-spec goal)
 
@@ -979,3 +1262,9 @@ them keep the live-apply case.
 - Panels (§7) allocate one arena per open/close; launcher PATH scan is
   cached and revalidated by mtime, so opening the launcher costs one
   directory stat in the common case.
+- The tray (§7.6) costs one polled descriptor and nothing else while it is
+  idle: an internal deadline (item death grace, a stalled property fetch) is
+  the only thing that ever wakes the loop, and it re-decodes an icon only
+  when the target size changes. The poll set is capped at 64 entries and
+  script-module descriptors are capped below that ceiling, so the tray
+  descriptor is never the thing that gets starved (§2).

@@ -3,7 +3,8 @@
 <p align="center"><img src="logo_white.svg" alt="austere" width="96"></p>
 
 A low-spec X11 desktop shell: tiling/stacking/floating window manager,
-modular status bar, app launcher, start menu, config switcher, window switcher and wallpaper picker.
+modular status bar with a native system tray, app launcher, start menu,
+config switcher, window switcher and wallpaper picker.
 
 this project is experimental software still being worked on. please forgive me for any goofy stuff :)
 
@@ -37,19 +38,19 @@ Three copy-paste blocks and you're done.
 **Debian / Ubuntu**
 
 ```sh
-sudo apt install -y git build-essential pkg-config libxcb1-dev libxcb-keysyms1-dev libxcb-icccm4-dev libxcb-randr0-dev libxcb-xtest0-dev libxcb-shape0-dev libfontconfig1-dev libfreetype6-dev libimlib2-dev
+sudo apt install -y git build-essential pkg-config libxcb1-dev libxcb-keysyms1-dev libxcb-icccm4-dev libxcb-randr0-dev libxcb-xtest0-dev libxcb-shape0-dev libfontconfig1-dev libfreetype6-dev libimlib2-dev libdbus-1-dev
 ```
 
 **Arch Linux**
 
 ```sh
-sudo pacman -S --needed base-devel git libxcb xcb-util-keysyms xcb-util-wm fontconfig freetype2 imlib2
+sudo pacman -S --needed base-devel git libxcb xcb-util-keysyms xcb-util-wm fontconfig freetype2 imlib2 dbus
 ```
 
 **Fedora**
 
 ```sh
-sudo dnf install -y git gcc make pkgconf-pkg-config libxcb-devel xcb-util-keysyms-devel xcb-util-wm-devel xcb-util-randr-devel xcb-util-xtest-devel fontconfig-devel freetype-devel imlib2-devel
+sudo dnf install -y git gcc make pkgconf-pkg-config libxcb-devel xcb-util-keysyms-devel xcb-util-wm-devel xcb-util-randr-devel xcb-util-xtest-devel fontconfig-devel freetype-devel imlib2-devel dbus-devel
 ```
 
 **Any distribution** — clone, build, install:
@@ -64,8 +65,11 @@ sudo make install
 *Package names vary by release — search your distribution for these if
 one is missing. Remove with `sudo make uninstall`. Wallpaper thumbnails
 need Imlib2 (default); build with `make AUSTERE_NO_IMLIB2=1` to skip it.
-The TOML parser ([tomlc17](3rdparty/)) is vendored, so nothing else is
-required.*
+The internal notification service and the system tray both talk to the
+session bus over libdbus (default); build with `make AUSTERE_NO_DBUS=1` for
+a WM that never touches the bus — the tray module is still accepted in
+your config, it just stays empty. The TOML parser
+([tomlc17](3rdparty/)) is vendored, so nothing else is required.*
 
 ## Starting austere
 
@@ -91,9 +95,16 @@ Other options: `--restart` (restart in place, restoring sessions).
 - **Workspaces** (i3 model, 9 per output set) across **multiple
   monitors** with RandR hotplug and workspace migration
 - **Modular status bar**: built-ins (workspaces, layout, title, clock,
-  battery, volume, cpu, ram) plus script modules over exec pipes — a
+  battery, volume, cpu, ram, tray) plus script modules over exec pipes — a
   script's every line is one frame; death freezes the last frame and
   fires an internal notification; configurable `bar_gap` floating inset
+- **System tray**: native StatusNotifierItem host — austere owns
+  `org.kde.StatusNotifierWatcher` and renders SNI/AppIndicator icons in
+  the bar. Left click activates, middle click secondary-activates, right
+  click opens the item's own menu, wheel scrolls; passive items stay
+  hidden, attention icons show. The item menu is flat — labels,
+  separators, disabled rows, toggle/radio state and row icons; no
+  submenus or tooltips yet. Legacy XEmbed trays are not supported
 - **Settings**: TOML config (`~/.config/austere/austere.conf`) plus
   named config **states** (`super+grave`) that auto-apply when picked
   and persist across boots; transactional reload via state pick, the
@@ -191,6 +202,7 @@ deco = true              # title bar with close/maximize on every window
 [bar]
 position = "top"         # top | bottom
 bar_gap = 0              # floating inset from screen edge
+modules_right = ["tray", "cpu", "ram", "battery", "volume", "clock"]
 
 [behavior]
 focus_follows_mouse = true
@@ -211,6 +223,24 @@ cmd = "xdg-open \"https://duckduckgo.com/?q=%s\""
 setter_command = "feh --bg-scale %s"
 dirs = ["~/Pictures/wallpapers"]
 ```
+
+### System tray
+
+The tray is the `"tray"` bar module. Freshly generated configs already list
+it first in `modules_right`; **an existing config keeps the module list it
+was written with**, so add `"tray"` to `[bar] modules_left`,
+`modules_center`, or `modules_right` yourself and reload (`super+Escape`).
+
+Two operational notes:
+
+- If another program already owns `org.kde.StatusNotifierWatcher` (a
+  panel's own tray, `stalonetray`, a second austere), austere does not
+  fight it for the name: it says so on stderr and the tray stays empty.
+  Indicators that only talk to a watcher will simply not appear — there is
+  no second one to fall back to. Stop the other watcher and austere picks
+  the name up on the next bus event.
+- A `make AUSTERE_NO_DBUS=1` build never talks to the bus. The module
+  name is still accepted in your config, it just renders nothing.
 
 ## Command socket
 
@@ -234,8 +264,36 @@ src/layouts/      one file per layout
 src/bar_modules/  one file per built-in status module
 contrib/          austere-cmd CLI + display-manager session entry
 3rdparty/         vendored tomlc17 (TOML parser)
+scripts/          make test harnesses (tray watcher, bar UI, tray menu)
 docs/             SPEC.md, PHILOSOPHY.md
 ```
+
+## Tests
+
+```sh
+make test              # or: make -j3 test
+```
+
+three harnesses — StatusNotifierWatcher protocol conformance
+(`scripts/test-sni-watcher.sh`), tray bar-module interaction
+(`scripts/test-tray-ui.sh`), and the tray item menu
+(`scripts/test-tray-menu.sh`). Each runs on its own private Xvfb display
+and its own private session bus, on disjoint display ranges, so they can
+run concurrently. Every process they start is stopped with a bounded
+`SIGTERM` → `SIGKILL` → reap, so nothing outlives its harness.
+
+They need `Xvfb`, `dbus-run-session`, `dbus-send` and `awk`; the two UI
+suites also need `xdotool`/`xwininfo`/`xwd`/`convert` and a `python3` with
+GObject introspection. A missing tool is an explicit `SKIP` — never a pass,
+never a failure. Anything present is a hard gate, and a real regression
+fails `make test`.
+
+130 checks in the last validated local run. When `caffeine` is installed,
+its acceptance is an automated hard gate on all three claims: the themed
+`caffeine-cup-empty` icon resolves with no `IconPixmap` fallback, the real
+right-click opens a real popup with rows, and a real *Quit* row ends the
+app. Only a machine that cannot supply the app reports
+`ACCEPTANCE BLOCKED`.
 
 ## Documentation
 

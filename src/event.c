@@ -30,6 +30,7 @@
 #include "popup.h"
 #include "layout.h"
 #include "tray.h"
+#include "tray_menu_ui.h"
 #include "volume.h"
 #include "monitor.h"
 #include "mouse.h"
@@ -201,6 +202,11 @@ run_action(wm_t *wm, uint8_t action)
 static void
 handle_key_press(wm_t *wm, xcb_key_press_event_t *ev)
 {
+    /* The tray popup holds no focus and takes no grab, so Escape can only
+     * be caught here; it goes ahead of the keybind table and the settings
+     * panel, which both mean something else while a menu is up. */
+    if (tray_menu_ui_key(wm, ev))
+        return;
     if (menu_active()) {
         menu_key(wm, ev);
         return;
@@ -278,6 +284,10 @@ handle_destroy_notify(wm_t *wm, xcb_destroy_notify_event_t *ev)
         unmanage(wm, ev->window);
     } else if (menu_owns_window(ev->window)) {
         menu_window_gone(wm, ev->window);
+    } else if (tray_menu_ui_owns_window(ev->window)) {
+        /* WM-owned: a destroy for the tray popup's own window must never
+         * fall through to the client and decoration paths below */
+        tray_menu_ui_sync(wm);
     } else {
         client_t *c2 = find_client_by_deco(wm, ev->event);
         if (c2 && c2->deco) {
@@ -492,6 +502,13 @@ handle_event(wm_t *wm, xcb_generic_event_t *ev)
         xcb_button_press_event_t *bev =
             (xcb_button_press_event_t *)ev;
 
+        /* First, because the tray popup is the topmost surface while it is
+         * up: a press inside it is consumed here, a press outside closes it
+         * and is consumed, and a press on a bar window closes it but is
+         * passed on, so pressing another tray icon switches menus rather
+         * than only dismissing. */
+        if (tray_menu_ui_button(wm, bev))
+            break;
         if (menu_panel_button(wm, bev->event, bev->event_y,
                 bev->detail))
             break;
@@ -511,6 +528,8 @@ handle_event(wm_t *wm, xcb_generic_event_t *ev)
         if (menu_owns_window(((xcb_expose_event_t *)ev)->window))
             menu_expose(wm);
         else if (popup_expose(wm, ((xcb_expose_event_t *)ev)->window))
+            ;
+        else if (tray_menu_ui_expose(wm, ((xcb_expose_event_t *)ev)->window))
             ;
         else if (find_client_by_deco(wm,
             ((xcb_expose_event_t *)ev)->window))
@@ -659,6 +678,9 @@ event_loop(wm_t *wm)
             tray_render_pending();
             bar_render_all(wm); /* minute tick */
             popups_tick(wm);
+            /* the backend has moved; the popup is the only thing that
+             * shows it, and the event loop is the only place that does */
+            tray_menu_ui_sync(wm);
             continue;
         }
 
@@ -674,6 +696,9 @@ event_loop(wm_t *wm)
                      * wake, and never inside a bar render */
                     if (tray_render_pending())
                         bar_render_all(wm);
+                    /* the same wakeup that may have moved the menu
+                     * backend is the one that redraws the popup */
+                    tray_menu_ui_sync(wm);
                 } else
                     bar_pump_fd(wm, all[i].fd);
             }
