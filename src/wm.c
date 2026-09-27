@@ -27,6 +27,7 @@
 #include "states.h"
 #include "socket.h"
 #include "state.h"
+#include "tray.h"
 #include "welcome.h"
 #include "keys.h"
 #include "conf.h"
@@ -218,6 +219,7 @@ shutdown(wm_t *wm)
     socket_shutdown(wm);
     bars_shutdown(wm);
     notify_shutdown(wm);
+    tray_shutdown(wm);
     popups_shutdown(wm);
     draw_shutdown(wm);
     ungrab_keys(wm);
@@ -342,6 +344,9 @@ wm_main(int argc, char **argv)
     bar_init(&wm);
     popups_init(&wm);
     notify_init(&wm);
+    /* the tray owns its own bus connection and the watcher name; it is
+     * inert in an AUSTERE_NO_DBUS build */
+    tray_init(&wm);
     bars_sync(&wm);
 
     deco_init(&wm);

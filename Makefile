@@ -25,7 +25,7 @@ NOTIFYLIBS  = $(shell pkg-config --libs dbus-1)
 endif
 BIN     = austere
 
-.PHONY: clean install uninstall install-states
+.PHONY: clean install uninstall install-states test
 
 $(BIN): $(OBJS) Makefile
 	$(CC) $(CFLAGS) $(WPFLAGS) $(NOTIFYFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(WPLIBS) $(NOTIFYLIBS)
@@ -40,6 +40,20 @@ contrib/austere-cmd: contrib/austere-cmd.c
 
 clean:
 	rm -f $(BIN) $(OBJS) $(DEPS) contrib/austere-cmd
+
+# StatusNotifierWatcher conformance: private Xvfb display, private session
+# bus, throwaway HOME. Needs Xvfb, dbus-run-session, dbus-send; the script
+# exits 77 when one is missing, which is a skip - not a pass, and not a
+# failure of the tree either.
+test: $(BIN)
+	@rc=0; ./scripts/test-sni-watcher.sh $(BIN) || rc=$$?; \
+	if [ $$rc -eq 77 ]; then \
+		echo "tray conformance: SKIPPED (test dependencies missing)"; \
+	elif [ $$rc -ne 0 ]; then \
+		echo "tray conformance: FAILED ($$rc)"; exit $$rc; \
+	else \
+		echo "tray conformance: PASSED"; \
+	fi
 
 PREFIX    ?= /usr/local
 SESSIONDIR ?= /usr/share/xsessions

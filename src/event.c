@@ -29,6 +29,7 @@
 #include "notify.h"
 #include "popup.h"
 #include "layout.h"
+#include "tray.h"
 #include "volume.h"
 #include "monitor.h"
 #include "mouse.h"
@@ -569,6 +570,7 @@ event_loop(wm_t *wm)
     char buf[16];
     int sk_idx = -1;
     int nf_idx = -1;
+    int tr_idx = -1;
 
     memcpy(all, fds, sizeof(fds));
     unsigned nfds = 2;
@@ -589,7 +591,18 @@ event_loop(wm_t *wm)
         xcb_flush(wm->conn);
 
         nfds = 2;
-        bar_collect_fds(wm, all, &nfds, 61);
+        /* Poll budget: all[64] holds the X connection and the self-pipe
+         * (2), at most 58 script-module descriptors from the bars, and
+         * one slot each for the control socket, the notification
+         * connection, and the tray connection. Capping the bars below
+         * what would fill the array is what stops those three special
+         * descriptors from being starved: without a slot they are not
+         * polled at all, which is how an unread bus fd turns into a
+         * 100% CPU spin in bar_pump_fd. The cost is honest: a setup
+         * running more than 58 script modules across all monitors drops
+         * the extra descriptors instead of taking a special one, and
+         * those modules stop updating until the bar layout changes. */
+        bar_collect_fds(wm, all, &nfds, 58);
         int sk = socket_fd();
 
         if (sk >= 0 && nfds < 64) {
@@ -608,11 +621,25 @@ event_loop(wm_t *wm)
             nfds++;
         } else
             nf_idx = -1;
+        int tfd = tray_fd();
+
+        /* the tray descriptor is a private bus connection of its own; it
+         * must be recognised below or an unread descriptor spins poll */
+        if (tfd >= 0 && nfds < 64) {
+            all[nfds].fd = tfd;
+            all[nfds].events = POLLIN;
+            tr_idx = (int)nfds;
+            nfds++;
+        } else
+            tr_idx = -1;
         int timeout = bar_timeout_ms(wm);
         int pt = popups_timeout_ms(wm);
+        int tt = tray_timeout_ms(wm);
 
         if (pt >= 0 && (timeout < 0 || pt < timeout))
             timeout = pt;
+        if (tt >= 0 && (timeout < 0 || tt < timeout))
+            timeout = tt;
 
         int r = poll(all, nfds, timeout);
 
@@ -625,6 +652,11 @@ event_loop(wm_t *wm)
         }
 
         if (r == 0) {
+            /* tray_tick may have changed the snapshot; the repaint below
+             * already covers it, so consume the flag rather than asking
+             * for a second render */
+            tray_tick(wm);
+            tray_render_pending();
             bar_render_all(wm); /* minute tick */
             popups_tick(wm);
             continue;
@@ -636,7 +668,13 @@ event_loop(wm_t *wm)
                     socket_handle(wm);
                 else if ((int)i == nf_idx)
                     notify_pump(wm);
-                else
+                else if ((int)i == tr_idx) {
+                    tray_pump(wm);
+                    /* the backend only raises a flag: one repaint per
+                     * wake, and never inside a bar render */
+                    if (tray_render_pending())
+                        bar_render_all(wm);
+                } else
                     bar_pump_fd(wm, all[i].fd);
             }
         }

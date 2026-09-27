@@ -93,6 +93,64 @@ path_find(const char *name)
     return NULL;
 }
 
+/* The loader itself: resolve a name (or absolute path) and decode it,
+ * scaled to target_h. It allocates a fresh image_t every time, so it is
+ * the entry point for callers that must not grow (or read) the
+ * process-lifetime cache. */
+image_t *
+icon_resolve(const char *name, unsigned target_h)
+{
+    Imlib_Image src, scaled;
+    uint32_t *data, *buf;
+    image_t *img;
+    int iw, ih, tw;
+    char *path;
+
+    if (!name || !*name || target_h == 0)
+        return NULL;
+    path = path_find(name);
+    if (!path)
+        return NULL;
+    src = imlib_load_image(path);
+
+    if (!src)
+        return NULL;
+    imlib_context_set_image(src);
+    iw = imlib_image_get_width();
+    ih = imlib_image_get_height();
+
+    if (iw <= 0 || ih <= 0) {
+        imlib_free_image();
+        return NULL;
+    }
+    tw = (int)((long)iw * (long)target_h / ih);
+
+    if (tw < 1)
+        tw = 1;
+    scaled = imlib_create_cropped_scaled_image(0, 0, iw, ih, tw,
+        (int)target_h);
+
+    imlib_free_image();
+    if (!scaled)
+        return NULL;
+    imlib_context_set_image(scaled);
+    data = imlib_image_get_data_for_reading_only();
+    buf = malloc((size_t)tw * target_h * sizeof(uint32_t));
+    img = calloc(1, sizeof(image_t));
+    if (buf && img) {
+        memcpy(buf, data, (size_t)tw * target_h * sizeof(uint32_t));
+        img->argb = buf;
+        img->w = (unsigned)tw;
+        img->h = target_h;
+    } else {
+        free(buf);
+        free(img);
+        img = NULL;
+    }
+    imlib_free_image();
+    return img;
+}
+
 image_t *
 icon_get(const char *name, unsigned target_h)
 {
@@ -114,51 +172,19 @@ icon_get(const char *name, unsigned target_h)
     ico_t *ent = &cache[ncache];
 
     ncache++;
-    char *path = path_find(name);
-
-    if (!path)
-        return NULL;
-    Imlib_Image src = imlib_load_image(path);
-
-    if (!src)
-        return NULL;
-    imlib_context_set_image(src);
-    int iw = imlib_image_get_width();
-    int ih = imlib_image_get_height();
-
-    if (iw <= 0 || ih <= 0) {
-        imlib_free_image();
-        return NULL;
-    }
-    int tw = (int)((long)iw * (long)target_h / ih);
-
-    if (tw < 1)
-        tw = 1;
-    Imlib_Image scaled = imlib_create_cropped_scaled_image(0, 0, iw, ih,
-        tw, (int)target_h);
-
-    imlib_free_image();
-    if (!scaled)
-        return NULL;
-    imlib_context_set_image(scaled);
-    uint32_t *data = imlib_image_get_data_for_reading_only();
-    uint32_t *buf = malloc((size_t)tw * target_h * sizeof(uint32_t));
-
-    if (buf) {
-        memcpy(buf, data, (size_t)tw * target_h * sizeof(uint32_t));
-        ent->img = calloc(1, sizeof(image_t));
-        if (ent->img) {
-            ent->img->argb = buf;
-            ent->img->w = (unsigned)tw;
-            ent->img->h = target_h;
-        } else
-            free(buf);
-    }
-    imlib_free_image();
+    ent->img = icon_resolve(name, target_h);
     return ent->img;
 }
 
 #else /* AUSTERE_NO_IMLIB2 */
+
+image_t *
+icon_resolve(const char *name, unsigned target_h)
+{
+    (void)name;
+    (void)target_h;
+    return NULL;
+}
 
 image_t *
 icon_get(const char *name, unsigned target_h)
