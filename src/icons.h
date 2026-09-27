@@ -29,4 +29,23 @@ image_t *icon_get(const char *name, unsigned target_h);
  * its own storage anyway. */
 image_t *icon_resolve(const char *name, unsigned target_h);
 
+/* Same resolve-only guarantee as icon_resolve(), plus a caller-supplied
+ * icon theme to search first: extra_path is a colon-separated list of
+ * theme roots, as an SNI's IconThemePath arrives, and NULL or "" means
+ * only the XDG data dirs. A bare name is matched as theme content
+ * (index.theme Directories and Inherits) before it is tried as a
+ * plain path. Still uncached, so no entry survives the call and a
+ * client that picks a fresh name every time cannot grow anything.
+ *
+ * The returned image belongs to the resolver, not the caller: it stays
+ * valid until the next icon_resolve_ex() call, so copy the pixels out
+ * before doing anything else. It is const because the caller neither
+ * owns nor modifies it, and must not free it or push it into
+ * icon_get()'s cache.
+ *
+ * Remote names (an item's IconName or AttentionIconName, a menu row's
+ * icon) must go through this, never icon_get(). */
+const image_t *icon_resolve_ex(const char *name, unsigned target_h,
+    const char *extra_path);
+
 #endif
