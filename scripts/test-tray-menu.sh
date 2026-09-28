@@ -1213,6 +1213,103 @@ if open_menu noic "opened before the item dies"; then
     fi
 fi
 
+# Open one tray item's own menu without asking any particular item to
+# answer quickly. A press to the right of the tray is austere's settings
+# menu, so a popup on its own is not proof of a tray exchange: the item's
+# own AboutToShow in the mark is. Both waits are generous on purpose,
+# because the whole point of the phase is a wm that is (or is not) busy,
+# and a check that only works on a fast one proves nothing.
+open_a_tray_menu() {
+    _px=$((BX + BW - 6))
+    while [ "$_px" -gt $((BX + BW * 30 / 100)) ]; do
+        _p=""
+        : >"$SNI_MARK"
+        press "$_px" "$Y" 3
+        _t=0
+        while [ "$_t" -lt 30 ]; do
+            _p=$(find_popup "$_px")
+            [ -n "$_p" ] && { POPUP="$_p"; CELL="$_px"; break; }
+            sleep 0.1
+            _t=$((_t + 1))
+        done
+        if [ -n "$_p" ]; then
+            _t=0
+            while [ "$_t" -lt 20 ]; do
+                grep -q "MENU .*AboutToShow" "$SNI_MARK" 2>/dev/null &&
+                    { echo "$_px"; return 0; }
+                sleep 0.1
+                _t=$((_t + 1))
+            done
+            xdotool key --clearmodifiers Escape
+            sleep 0.3
+        fi
+        _px=$((_px - 6))
+    done
+    return 1
+}
+
+echo "-- phase K2: a dismissed menu leaves the loop idle, not spinning"
+# The tray arms one wakeup for a menu exchange, and that wakeup expires on
+# its own: a menu that was answered, dismissed or failed leaves nothing
+# behind to wait for. The evidence here is deliberately not a pixel diff,
+# because a repaint of identical content is invisible - a repaint storm
+# has nothing to show on the screen it is thrashing. What it does have is
+# cost: a wakeup that is never cleared answers poll() with a timeout of
+# zero, forever, and every one of those turns draws a full bar and makes
+# the X server push all of those pixels again.
+#
+# So this measures what the two processes burn while nothing happens, over
+# windows that sit well past the wakeup the press armed (2000 ms). A loop
+# that sleeps reads 0-1 for the wm and 0 for the server; a stuck deadline
+# reads around half a core for the wm (a tenth of one where the bar has
+# nothing else to draw) and a few percent for the server, for as long as
+# you watch. Both numbers come from /proc, so a host without it reports
+# SKIP for the phase instead of passing it vacuously.
+cpu_jiffies() {   # cpu_jiffies <pid> -> utime+stime in clock ticks
+    awk '{ print $14 + $15 }' "/proc/$1/stat" 2>/dev/null || echo ""
+}
+if [ ! -r "/proc/$WM_PID/stat" ] || [ ! -r "/proc/$XVFB_PID/stat" ]; then
+    echo "  SKIP no /proc cpu accounting: the idle-repaint check needs it"
+else
+    TICKS=$(getconf CLK_TCK 2>/dev/null || echo 100)
+    # A press, an exchange and a dismissal: the sequence that arms the
+    # wakeup, so what follows measures a spent one.
+    if _cell=$(open_a_tray_menu) && [ -n "$_cell" ]; then
+        ok "a tray item's own menu opened for the idle check (cell x=$_cell)"
+        close_popup
+        sleep 2.5
+        w0=$(cpu_jiffies "$WM_PID")
+        x0=$(cpu_jiffies "$XVFB_PID")
+        sleep 3
+        w1=$(cpu_jiffies "$WM_PID")
+        x1=$(cpu_jiffies "$XVFB_PID")
+        wj=$((w1 - w0))
+        xj=$((x1 - x0))
+        # Printed, not asserted: the server's own cost is the same drawing
+        # seen from the other side, and it moves with how much the bar has
+        # to draw rather than with the loop's own behaviour. The wm's
+        # number is the assertion - a stuck deadline measures 0.5-1.0 of a
+        # core here, a loop that sleeps measures 0, and the threshold sits
+        # an order of magnitude above healthy.
+        echo "     3s idle: wm $wj jiffies, x server $xj jiffies (CLK_TCK=$TICKS)"
+        if [ "$wj" -lt $((TICKS * 3 / 5)) ]; then
+            ok "the wm sleeps once the menu's wakeup is spent ($wj/$TICKS s)"
+        else
+            bad "the wm is still busy 3s after the menu closed ($wj/$TICKS s)"
+        fi
+        # and it must not creep back: an overdue deadline serviced once,
+        # rather than pinned, is the difference this second window proves
+        sleep 3
+        w2=$(cpu_jiffies "$WM_PID")
+        wk=$((w2 - w1))
+        if [ "$wk" -lt $((TICKS * 3 / 5)) ]; then
+            ok "the 3s after that are idle as well ($wk/$TICKS s)"
+        else
+            bad "the wm is busy again in the window after that ($wk/$TICKS s)"
+        fi
+    fi
+fi
+
 echo "-- phase L: shutdown is clean"
 # The canonical layout must have produced rows for every menu in this
 # harness, so an empty-layout fallback is a failure here and not only in
@@ -1254,6 +1351,9 @@ echo "== $PASS passed, $FAIL failed"
 CHECK
 
 export WM_PID LOG="$TMP/austere.log" SNI_MARK="$TMP/mark" DISPLAY="$DISP"
+# The idle-repaint phase needs to know which process is the X server, to
+# watch it for drawing it was never asked to do.
+export XVFB_PID
 export BIN TMP
 export HOME="$TMP/home"
 export XDG_CONFIG_HOME="$TMP/home/.config"

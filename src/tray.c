@@ -23,6 +23,10 @@ static unsigned nview;
 /* Maps every snapshot index back to its table slot, so an action can be
  * resolved to a stable identity (copied out) before any bus traffic. */
 static unsigned view_src[TRAY_MAX_ITEMS];
+/* What each visible row's artwork is, by content. Kept beside the view
+ * so the repaint decision is made on the picture and not on the address
+ * it happens to sit at. */
+static uint64_t view_img_sig[TRAY_MAX_ITEMS];
 
 #define WATCHER_NAME "org.kde.StatusNotifierWatcher"
 #define WATCHER_PATH "/StatusNotifierWatcher"
@@ -82,6 +86,7 @@ typedef struct {
     long long grace_until;        /* monotonic ms */
     image_t *img;                 /* active image, owned by this item */
     uint32_t *px;                 /* its pixels when we own them */
+    uint64_t img_sig;             /* content signature of img, 0 if none */
     uint32_t *fbpx;               /* IconPixmap fallback pixels */
     unsigned fbw, fbh;
     dbus_uint32_t pending;        /* in-flight GetAll serial, 0 = none */
@@ -243,22 +248,27 @@ img_clear(ti_t *it)
     free(it->px);
     it->img = NULL;
     it->px = NULL;
+    it->img_sig = 0;
 }
 
-static void
-img_set(ti_t *it, uint32_t *px, unsigned w, unsigned h)
+/* What the picture is, not where it happens to live: the dimensions and
+ * the pixels, folded into one bounded word. A re-resolved icon that
+ * decodes to the same artwork has the same signature, which is what lets
+ * a byte-identical GetAll or PropertiesChanged be recognised as the no
+ * visual change it is. One pass over pixels the resolver already
+ * produced, no second copy kept. A real image never hashes to 0, so 0
+ * stays unambiguously "no image". */
+static uint64_t
+img_signature(const image_t *img)
 {
-    if (!px || !w || !h)
-        return;
-    it->img = calloc(1, sizeof(*it->img));
-    if (!it->img) {
-        free(px);
-        return;
-    }
-    it->img->argb = px;
-    it->img->w = w;
-    it->img->h = h;
-    it->px = px;
+    uint64_t h = 1469598103934665603ULL;
+
+    if (!img || !img->argb || !img->w || !img->h)
+        return 0;
+    hash_bytes(&h, &img->w, sizeof(img->w));
+    hash_bytes(&h, &img->h, sizeof(img->h));
+    hash_bytes(&h, img->argb, (size_t)img->w * img->h * sizeof(uint32_t));
+    return h ? h : 1;
 }
 
 /* Themed names first (Attention wins for NeedsAttention), then the
@@ -271,10 +281,13 @@ icon_pick(ti_t *it)
     unsigned ncand = 0;
     const char *picked = NULL;
     const char *theme = it->theme_path[0] ? it->theme_path : NULL;
+    /* The candidate is built aside and only adopted at the end, so a
+     * resolve that turns out to be the picture already on screen costs
+     * one free instead of a swap. */
+    image_t *next = NULL;
+    uint32_t *next_px = NULL;
+    uint64_t next_sig = 0;
 
-    /* the old image goes first: a re-resolve must not leak it, and the
-     * pixmap fallback below reuses fbpx instead of owning a copy */
-    img_clear(it);
     if (it->status == TRAY_STATUS_ATTENTION && it->attn_name[0])
         cand[ncand++] = it->attn_name;
     if (it->icon_name[0])
@@ -282,6 +295,7 @@ icon_pick(ti_t *it)
     for (unsigned i = 0; i < ncand; i++) {
         const image_t *src;
         uint32_t *copy;
+        image_t *img;
         size_t n;
 
         if (!icon_name_ok(cand[i]))
@@ -297,41 +311,65 @@ icon_pick(ti_t *it)
             continue;
         n = (size_t)src->w * src->h * sizeof(uint32_t);
         copy = malloc(n);
-        if (!copy)
+        img = copy ? calloc(1, sizeof(*img)) : NULL;
+        if (!copy || !img) {
+            free(copy);
+            free(img);
             break;   /* the resolver reclaims its own image for us */
+        }
         memcpy(copy, src->argb, n);
-        img_set(it, copy, src->w, src->h);
+        img->argb = copy;
+        img->w = src->w;
+        img->h = src->h;
+        next = img;
+        next_px = copy;
+        next_sig = img_signature(img);
         picked = cand[i];
         it->icon_warned = false;
         break;
     }
-    if (picked || it->icon_warned)
-        return;
-    if (it->fbpx && it->fbw && it->fbh) {
-        it->img = calloc(1, sizeof(*it->img));
-        if (it->img) {
-            it->img->argb = it->fbpx;
-            it->img->w = it->fbw;
-            it->img->h = it->fbh;
+    if (!picked && !it->icon_warned) {
+        if (it->fbpx && it->fbw && it->fbh) {
+            next = calloc(1, sizeof(*next));
+            if (next) {
+                next->argb = it->fbpx;
+                next->w = it->fbw;
+                next->h = it->fbh;
+                next_sig = img_signature(next);
+            }
+            /* only the fallback cases are worth a line, and only once
+             * per episode: a themed name that worked needs no noise,
+             * but a pixmap-only or icon-less item is what an interop
+             * complaint is about */
+            it->icon_warned = true;
+            fprintf(stderr, "austere: tray: %s: no icon name resolved,"
+                " using IconPixmap %ux%u\n", it->id, it->fbw, it->fbh);
+        } else if (ncand) {
+            it->icon_warned = true;
+            fprintf(stderr, "austere: tray: %s: no icon for \"%s\"%s%s%s\n",
+                it->id, it->status == TRAY_STATUS_ATTENTION ? it->attn_name
+                : it->icon_name,
+                it->status == TRAY_STATUS_ATTENTION && it->icon_name[0] ?
+                " / \"" : "", it->status == TRAY_STATUS_ATTENTION &&
+                it->icon_name[0] ? it->icon_name : "",
+                it->status == TRAY_STATUS_ATTENTION && it->icon_name[0] ?
+                "\"" : "");
         }
-        /* only the fallback cases are worth a line, and only once per
-         * episode: a themed name that worked needs no noise, but a
-         * pixmap-only or icon-less item is what an interop complaint is
-         * about */
-        it->icon_warned = true;
-        fprintf(stderr, "austere: tray: %s: no icon name resolved,"
-            " using IconPixmap %ux%u\n", it->id, it->fbw, it->fbh);
-    } else if (ncand) {
-        it->icon_warned = true;
-        fprintf(stderr, "austere: tray: %s: no icon for \"%s\"%s%s%s\n",
-            it->id, it->status == TRAY_STATUS_ATTENTION ? it->attn_name
-            : it->icon_name,
-            it->status == TRAY_STATUS_ATTENTION && it->icon_name[0] ?
-            " / \"" : "", it->status == TRAY_STATUS_ATTENTION &&
-            it->icon_name[0] ? it->icon_name : "",
-            it->status == TRAY_STATUS_ATTENTION && it->icon_name[0] ?
-            "\"" : "");
     }
+    /* Same picture as the one already up: keep it. Adopting the fresh
+     * copy would be a visual no-op that still changes the view
+     * signature, so an item re-announcing the artwork it already has -
+     * which a PropertiesChanged round trip does routinely - would repaint
+     * the bar for nothing. */
+    if (next && next_sig && next_sig == it->img_sig) {
+        free(next_px);
+        free(next);
+        return;
+    }
+    img_clear(it);
+    it->img = next;
+    it->px = next_px;
+    it->img_sig = next ? next_sig : 0;
 }
 
 /* IconPixmap is a(iiay): pick the square closest to the target (a
@@ -578,15 +616,26 @@ view_rebuild(void)
          * what the bar draws, so a change in it must not cost a repaint.
          * The button path reads the live view, never a copy of it. */
         v->is_menu = it->is_menu;
+        /* the picture by content, beside the view entry it belongs to,
+         * so the hash below cannot see an address */
+        view_img_sig[n] = it->img_sig;
         n++;
     }
     hash_bytes(&h, &n, sizeof(n));
     for (unsigned i = 0; i < n; i++) {
-        hash_str(&h, view[i].title);
+        /* Title is not hashed: it is what a menu row or a tooltip says,
+         * not a pixel of the bar, and a client rewriting it - which
+         * Steam and every game launcher do, sometimes many times a
+         * second - must not repaint every bar. The snapshot still
+         * carries it, so a menu that wants the title reads the current
+         * one. */
         hash_bytes(&h, &view[i].status, sizeof(view[i].status));
         hash_str(&h, view[i].icon_name);
         hash_str(&h, view[i].menu_path);
-        hash_bytes(&h, &view[i].img, sizeof(view[i].img));
+        /* the image's content signature, not its pointer: two decodes
+         * of the same artwork are one picture, and a re-resolve that
+         * changed nothing must leave the bar alone */
+        hash_bytes(&h, &view_img_sig[i], sizeof(view_img_sig[i]));
     }
     nview = n;
     /* a repaint is only needed when the snapshot really changed */
@@ -1873,20 +1922,34 @@ tray_timeout_ms(wm_t *wm)
         if (dl < 0)
             continue;
         left = dl - now;
-        if (left < 0)
-            left = 0;
+        /* An overdue deadline is due to be serviced by the round that
+         * this very wake asks for, so it wants the shortest possible
+         * positive wait - never zero. Zero would ask poll() to come
+         * straight back, which is the same as a busy loop for as long
+         * as the deadline refuses to move, and the round that would
+         * clear it only runs after this call. */
+        if (left < 1)
+            left = 1;
         if (best < 0 || left < best)
             best = (int)left;
     }
-    /* a menu exchange in flight is waiting on a reply nobody may send, so
-     * the loop has to be woken for its deadline even on a quiet bus */
+    /* A menu exchange in flight is waiting on a reply nobody may send, so
+     * the loop has to be woken for its deadline even on a quiet bus. The
+     * hint is one-shot: past its end there is nothing left to wait for,
+     * and a spent hint must stop asking for a timeout rather than answer
+     * zero forever - that is the difference between a menu that is
+     * dismissed and a wm that never sleeps again. */
     if (menu_hint_until) {
-        long long left = menu_hint_until - now;
+        if (now >= menu_hint_until) {
+            menu_hint_until = 0;
+        } else {
+            long long left = menu_hint_until - now;
 
-        if (left < 0)
-            left = 0;
-        if (best < 0 || left < best)
-            best = (int)left;
+            if (left < 1)
+                left = 1;
+            if (best < 0 || left < best)
+                best = (int)left;
+        }
     }
     return best;
 }

@@ -430,8 +430,11 @@ handle_property_notify(wm_t *wm, xcb_property_notify_event_t *ev)
         return;
     }
     if (ev->atom == a->net_wm_name || ev->atom == XCB_ATOM_WM_NAME) {
-        client_refresh_name(wm, c);
-        bar_render_all(wm);
+        /* Only a title that really changed is worth a bar repaint: the
+         * property is rewritten by anything that likes to report, and a
+         * rewrite of the same bytes changes nothing on screen. */
+        if (client_refresh_name(wm, c))
+            bar_render_all(wm);
     }
     if (ev->atom == a->net_wm_state) {
         size_t slen = 0;
@@ -524,20 +527,31 @@ handle_event(wm_t *wm, xcb_generic_event_t *ev)
             mouse_press(wm, bev);
         break;
     }
-    case XCB_EXPOSE:
-        if (menu_owns_window(((xcb_expose_event_t *)ev)->window))
+    case XCB_EXPOSE: {
+        xcb_expose_event_t *xev = (xcb_expose_event_t *)ev;
+
+        /* Ownership is dispatched for every one of them, because every
+         * one of them is a real region that has to be answered. The bar
+         * is the exception: an expose storm - a game mapping and
+         * unmapping over it, a compositor uncovering it a pixel at a
+         * time - arrives as a batch of events for the same window where
+         * count is how many are still to come, and the last one carries
+         * count == 0. Redrawing a full bar per event is the repaint
+         * storm behind the flicker, so the bar is drawn once, on the
+         * last of the batch: the earlier ones are the same window
+         * becoming visible, which one draw covers. */
+        if (menu_owns_window(xev->window))
             menu_expose(wm);
-        else if (popup_expose(wm, ((xcb_expose_event_t *)ev)->window))
+        else if (popup_expose(wm, xev->window))
             ;
-        else if (tray_menu_ui_expose(wm, ((xcb_expose_event_t *)ev)->window))
+        else if (tray_menu_ui_expose(wm, xev->window))
             ;
-        else if (find_client_by_deco(wm,
-            ((xcb_expose_event_t *)ev)->window))
-            deco_draw(wm, find_client_by_deco(wm,
-                ((xcb_expose_event_t *)ev)->window));
-        else
-            bar_expose(wm, ((xcb_expose_event_t *)ev)->window);
+        else if (find_client_by_deco(wm, xev->window))
+            deco_draw(wm, find_client_by_deco(wm, xev->window));
+        else if (xev->count == 0)
+            bar_expose(wm, xev->window);
         break;
+    }
     case XCB_MOTION_NOTIFY:
         mouse_motion(wm, (xcb_motion_notify_event_t *)ev);
         break;
@@ -651,9 +665,10 @@ event_loop(wm_t *wm)
             nfds++;
         } else
             tr_idx = -1;
-        int timeout = bar_timeout_ms(wm);
+        int bt = bar_timeout_ms(wm);
         int pt = popups_timeout_ms(wm);
         int tt = tray_timeout_ms(wm);
+        int timeout = bt;
 
         if (pt >= 0 && (timeout < 0 || pt < timeout))
             timeout = pt;
@@ -671,13 +686,29 @@ event_loop(wm_t *wm)
         }
 
         if (r == 0) {
-            /* tray_tick may have changed the snapshot; the repaint below
-             * already covers it, so consume the flag rather than asking
-             * for a second render */
+            /* Which deadline ended the sleep. Only the one poll was
+             * waiting on can have expired, so a subsystem that did not
+             * match is still in the future and must not pay for this
+             * wake: the toast clock ticking is not a reason to redraw
+             * every bar, and a tray retry is not a reason to redraw one
+             * twice. */
+            bool bar_due = bt >= 0 && bt == timeout;
+            bool popup_due = pt >= 0 && pt == timeout;
+
+            /* Unconditional: the tray's deadlines are cheap when nothing
+             * is due, and this is the only place a deadline that came
+             * due during somebody else's sleep gets serviced. */
             tray_tick(wm);
-            tray_render_pending();
-            bar_render_all(wm); /* minute tick */
-            popups_tick(wm);
+            /* The flag is consumed either way. Throwing it away here
+             * would lose a repaint the backend asked for, and that is
+             * how a tray change that happened inside an unrelated wake
+             * stayed invisible. */
+            bool tray_dirty = tray_render_pending();
+
+            if (bar_due || tray_dirty)
+                bar_render_all(wm);     /* at most one render per wake */
+            if (popup_due)
+                popups_tick(wm);
             /* the backend has moved; the popup is the only thing that
              * shows it, and the event loop is the only place that does */
             tray_menu_ui_sync(wm);

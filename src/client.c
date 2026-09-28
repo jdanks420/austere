@@ -353,7 +353,12 @@ swallow_victim_find(wm_t *wm, client_t *c)
     return NULL;
 }
 
-void
+/* Re-read the window's name and report whether it actually changed. The
+ * answer is what the caller needs: WM_NAME is written by anything that
+ * feels like reporting progress - a game, a browser tab, Steam - often
+ * many times a second and often with the same bytes, and a repaint of
+ * every bar for a rewrite that changed nothing is the flicker. */
+bool
 client_refresh_name(wm_t *wm, client_t *c)
 {
     atoms_t *a = wm->atoms;
@@ -365,9 +370,14 @@ client_refresh_name(wm_t *wm, client_t *c)
         name = (char *)get_property(wm, c->win, XCB_ATOM_WM_NAME,
             XCB_ATOM_STRING, 8, &len);
     if (!name)
-        return;
+        return false;
+    if (c->name && !strcmp(c->name, name)) {
+        free(name);
+        return false;
+    }
     free(c->name);
     c->name = name;
+    return true;
 }
 
 /* §5.7: rounded bounding box via XShape, approximated with one

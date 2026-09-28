@@ -44,7 +44,10 @@ void focus_clear(wm_t *wm);
 void refocus_ws(wm_t *wm, unsigned idx);
 void client_set_urgent(wm_t *wm, client_t *c, bool urgent);
 void client_poll_urgency(wm_t *wm, client_t *c);
-void client_refresh_name(wm_t *wm, client_t *c);
+/* Re-read WM_NAME/_NET_WM_NAME into the cache. True when the title the
+ * wm holds actually changed, so a caller can repaint for a real title
+ * change and ignore the rewrites that are not one. */
+bool client_refresh_name(wm_t *wm, client_t *c);
 void set_border(wm_t *wm, client_t *c, unsigned long color);
 void client_shape(wm_t *wm, client_t *c, unsigned radius);
 void shape_window(wm_t *wm, xcb_window_t win, unsigned w, unsigned h,
